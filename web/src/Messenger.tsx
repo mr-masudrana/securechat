@@ -63,7 +63,12 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
     dlBusy.current.add(m.mid)
     setDl(d => ({ ...d, [m.mid]: 'loading' }))
     try {
-      const encData = await downloadBlob(m.file.id, token)
+      let encData = await downloadBlob(m.file.id, token)
+      // KV-তে নতুন ফাইল অন্য লোকেশনে পৌঁছাতে কয়েক সেকেন্ড লাগতে পারে, তাই কয়েকবার চেষ্টা
+      for (let i = 0; i < 3 && encData === null; i++) {
+        await new Promise(r => setTimeout(r, 3000))
+        encData = await downloadBlob(m.file.id, token)
+      }
       const upd: StoredMsg = encData === null
         ? { ...m, gone: true }
         : { ...m, blob: new Blob([await decryptFile(encData, m.file.k)], { type: safeType(m.file.m) }) }
@@ -158,7 +163,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
 
   const sendFile = async (peer: string, file: File, caption: string) => {
     if (file.size === 0) { setToast('ফাইলটা খালি'); return false }
-    if (file.size > MAX_FILE) { setToast('ফাইল সর্বোচ্চ ২৫ MB হতে পারবে'); return false }
+    if (file.size > MAX_FILE) { setToast('ফাইল সর্বোচ্চ ২০ MB হতে পারবে'); return false }
     if (!conn.current?.isOpen()) { setToast('কানেকশন নেই, একটু পরে চেষ্টা করুন'); return false }
     let uploaded = ''
     let sent = false

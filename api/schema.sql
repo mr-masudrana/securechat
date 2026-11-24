@@ -11,3 +11,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+  ticket_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key TEXT PRIMARY KEY,
+  count INTEGER NOT NULL,
+  reset_at INTEGER NOT NULL
+);

@@ -5,7 +5,7 @@ const MSGS = 'messages'
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 
-export const MAX_FILE = 25 * 1024 * 1024
+export const MAX_FILE = 20 * 1024 * 1024
 export type Identity = { privateKey: CryptoKey; publicKeyB64: string }
 export type FileMeta = { id: string; k: string; n: string; m: string; s: number; th?: string }
 export type Body = { t?: string; f?: FileMeta }

@@ -2,7 +2,7 @@
 
 E2EE মেসেজিং ওয়েব অ্যাপ। দুটো অংশ:
 
-- `api/` : Cloudflare Worker (D1 + Durable Objects + R2)
+- `api/` : Cloudflare Worker (D1 + Durable Objects + KV)
 - `web/` : React + Vite + Tailwind ফ্রন্টএন্ড
 
 ## লোকাল চালানো
@@ -18,8 +18,8 @@ cd web && npm install && npm run dev                         # টার্ম�
 1. Cloudflare Dashboard → Storage & Databases → D1 → Create database, নাম `securechat-db`।
    `database_id` কপি করে `api/wrangler.jsonc`-এ `REPLACE_WITH_YOUR_D1_DATABASE_ID`-এর জায়গায় বসান।
 2. D1 ডাটাবেজের Console ট্যাবে `api/schema.sql`-এর পুরো লেখা পেস্ট করে চালান।
-3. R2 → Create bucket, নাম `securechat-media`।
-   (ঐচ্ছিক) Settings → Object lifecycle rules-এ ৩০ দিন পর মুছে ফেলার নিয়ম দিন।
+3. KV → Create namespace, নাম `securechat-media`। ID কপি করে `api/wrangler.jsonc`-এ
+   `REPLACE_WITH_YOUR_KV_NAMESPACE_ID`-এর জায়গায় বসান। (কার্ড লাগে না; ফাইল ৩০ দিনে নিজে মুছে যায়।)
 
 ### ২. GitHub-এ আপলোড
 ```bash
@@ -49,8 +49,17 @@ Workers & Pages → Create → Import a repository → রিপো বেছে
 ### ৫. CORS শক্ত করা
 `api/wrangler.jsonc`-এ `ALLOWED_ORIGIN` এর মান ওয়েবের URL করে (যেমন `https://securechat-web.xxxx.workers.dev`) commit ও push করুন।
 
+## ধাপ ৮: নিরাপত্তা ও PWA (এই ভার্সনে যোগ হয়েছে)
+- লগইন/রেজিস্টার/আপলোডে রেট লিমিট (D1 কাউন্টার), পাসওয়ার্ড সর্বোচ্চ ২০০ অক্ষর।
+- WebSocket-এ সেশন টোকেনের বদলে ৩০ সেকেন্ডের এক-বারের টিকেট।
+- প্রতি কানেকশনে মেসেজ রেট লিমিট, প্রতি ইনবক্সে সর্বোচ্চ ৫০০টি অপেক্ষমাণ মেসেজ।
+- প্রতিদিন (cron) মেয়াদোত্তীর্ণ সেশন/টিকেট/কাউন্টার মুছে ফেলা।
+- ওয়েবে CSP ও নিরাপত্তা হেডার (`web/public/_headers`), হোম স্ক্রিনে ইনস্টলযোগ্য PWA।
+
+**আগে ডিপ্লয় করে থাকলে:** D1 Console-এ `api/schema.sql` আবার চালান (নতুন দুটো টেবিল যোগ হবে, পুরনো ডেটা থাকবে), তারপর push করুন।
+
 ## জানা সীমাবদ্ধতা
-- লগইনে রেট লিমিট নেই (Cloudflare ড্যাশবোর্ড থেকে WAF/Rate limiting rule দিন)।
+- সেশন টোকেন `localStorage`-এ থাকে। CSP স্ক্রিপ্ট ইনজেকশন আটকায়, তবুও XSS ঝুঁকি শূন্য নয়।
 - নতুন ব্রাউজারে লগইন করলে নতুন কী তৈরি হয়, পুরনো মেসেজ খুলবে না।
 - লোকাল মেসেজ ব্রাউজারে আনএনক্রিপ্টেড থাকে।
-- PWA (হোম স্ক্রিনে ইনস্টল) যোগ হয়নি।
+- ফরওয়ার্ড সিক্রেসি নেই (Double Ratchet নেই), কী ভেরিফিকেশন ম্যানুয়াল।
