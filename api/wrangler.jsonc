@@ -5,7 +5,7 @@
   "triggers": { "crons": ["0 3 * * *"] },
   "vars": {
     // প্রথমে "*" থাকুক। ওয়েব ডিপ্লয় হলে এখানে ওয়েবের URL বসান, যেমন "https://securechat-web.আপনার-নাম.workers.dev"
-    "ALLOWED_ORIGIN": "*"
+    "ALLOWED_ORIGIN": "https://securechat-web.ranabd.workers.dev"
   },
   "d1_databases": [
     {
