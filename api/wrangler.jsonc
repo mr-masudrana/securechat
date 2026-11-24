@@ -1,0 +1,25 @@
+{
+  "name": "securechat-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "vars": {
+    // প্রথমে "*" থাকুক। ওয়েব ডিপ্লয় হলে এখানে ওয়েবের URL বসান, যেমন "https://securechat-web.আপনার-নাম.workers.dev"
+    "ALLOWED_ORIGIN": "*"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "securechat-db",
+      "database_id": "0d24bd9c-e3d4-4a6d-89e7-25c87fa53c31"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "securechat-media" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "INBOX", "class_name": "Inbox" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Inbox"] }
+  ]
+}
