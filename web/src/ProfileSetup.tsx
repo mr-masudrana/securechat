@@ -2,6 +2,7 @@ import { useRef, useState, type ChangeEvent } from 'react'
 import { call } from './api'
 import { resizeAvatar } from './media'
 import type { Me } from './types'
+import Icon from './Icon'
 
 export default function ProfileSetup({ me, token, onDone, onLogout }: {
   me: Me; token: string; onDone: (me: Me) => void; onLogout: () => void
@@ -37,7 +38,7 @@ export default function ProfileSetup({ me, token, onDone, onLogout }: {
         <p className="text-slate-400 text-sm">স্বাগতম, {me.fullName}! একটা username বেছে নিন (পরে বদলানো যাবে না)।</p>
         <button onClick={() => fileRef.current?.click()}
           className="mx-auto size-28 rounded-full bg-slate-800 grid place-items-center overflow-hidden text-4xl">
-          {avatar ? <img src={avatar} alt="" className="size-full object-cover" /> : '📷'}
+          {avatar ? <img src={avatar} alt="" className="size-full object-cover" /> : <Icon name="camera" className="size-10 text-slate-400" />}
         </button>
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={pick} />
         <p className="text-xs text-slate-500">প্রোফাইল ছবি (ঐচ্ছিক, পরেও দেওয়া যাবে)</p>

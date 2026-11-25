@@ -18,6 +18,7 @@ export type Body = {
   pn?: { id: string; from: string; on: boolean }
   ed?: { id: string; t: string }
   dl?: { id: string }
+  rn?: { old: string } // নিজের username বদলের খবর
 }
 export type StoredMsg = {
   mid: string; owner: string; peer: string
@@ -83,8 +84,11 @@ export async function fingerprint(pubB64: string) {
 }
 
 export async function lookupUser(peer: string, token: string) {
-  return (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
+  const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
     { username: string; publicKey: string | null; fullName?: string; avatar?: string | null }
+  // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
+  if (u.publicKey) localStorage.setItem('pk:' + u.username.toLowerCase(), u.publicKey)
+  return u
 }
 
 // দুজনের কী থেকে একই নাম্বার তৈরি হয়, দুই পাশে মিললে মাঝখানে কেউ কী বদলায়নি
@@ -168,10 +172,11 @@ export async function decryptBody(id: Identity, me: string, from: string, token:
     if (o.ed && idOk(o.ed.id) && typeof o.ed.t === 'string' && o.ed.t.length > 0)
       body.ed = { id: o.ed.id, t: o.ed.t.slice(0, 5000) }
     if (o.dl && idOk(o.dl.id)) body.dl = { id: o.dl.id }
+    if (o.rn && nameOk(o.rn.old)) body.rn = { old: o.rn.old }
     if (o.q && idOk(o.q.id) && nameOk(o.q.from) && typeof o.q.t === 'string')
       body.q = { id: o.q.id, from: o.q.from, t: o.q.t.slice(0, 200) }
     if (o.fw === 1) body.fw = 1
-    return body.t === undefined && !body.f && !body.c && !body.x && !body.pn && !body.ed && !body.dl ? null : body
+    return body.t === undefined && !body.f && !body.c && !body.x && !body.pn && !body.ed && !body.dl && !body.rn ? null : body
   } catch {
     return null
   }
@@ -252,3 +257,92 @@ export async function mutateMessage(mid: string, fn: (m: StoredMsg) => StoredMsg
   })
 }
 export const deleteMessage = (mid: string) => idb(MSGS, 'readwrite', s => s.delete(mid))
+
+// শুধু এই ডিভাইসের সংরক্ষিত মেসেজ মুছে ফেলে (সার্ভার বা অন্যের ডিভাইসে প্রভাব নেই)
+export async function clearMessages(owner: string) {
+  const db = await openDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(MSGS, 'readwrite')
+    const s = tx.objectStore(MSGS)
+    const c = s.index('owner').openKeyCursor(IDBKeyRange.only(owner.toLowerCase()))
+    c.onsuccess = () => {
+      const cur = c.result
+      if (cur) { s.delete(cur.primaryKey); cur.continue() }
+    }
+    tx.oncomplete = () => res()
+    tx.onerror = tx.onabort = () => rej(tx.error)
+  })
+}
+
+// ---- username বদলের সময় এই ডিভাইসের ডেটা নতুন নামে সরানো ----
+function moveKeys(from: string, to: string, prefix: boolean) {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i)
+    if (!k || !(prefix ? k.startsWith(from) : k === from)) continue
+    const v = localStorage.getItem(k)!
+    localStorage.removeItem(k)
+    localStorage.setItem(to + k.slice(from.length), v)
+  }
+}
+
+function rewrite(fn: (m: StoredMsg, cur: IDBCursorWithValue, s: IDBObjectStore) => void, owner: string) {
+  return openDB().then(db => new Promise<void>((res, rej) => {
+    const tx = db.transaction(MSGS, 'readwrite')
+    const s = tx.objectStore(MSGS)
+    const c = s.index('owner').openCursor(IDBKeyRange.only(owner))
+    c.onsuccess = () => {
+      const cur = c.result
+      if (!cur) return
+      fn(cur.value as StoredMsg, cur, s)
+      cur.continue()
+    }
+    tx.oncomplete = () => res()
+    tx.onerror = tx.onabort = () => rej(tx.error)
+  }))
+}
+
+const rekey = (r: Record<string, string> | undefined, from: string, to: string) => {
+  if (!r || !(from in r)) return r
+  const n = { ...r }
+  n[to] = n[from]
+  delete n[from]
+  return n
+}
+
+// নিজের username বদলালে: owner, mid, রিঅ্যাকশন কী ও কোট নতুন নামে
+export async function renameOwner(oldName: string, newName: string) {
+  const o = oldName.toLowerCase(), n = newName.toLowerCase()
+  if (o === n) return
+  await rewrite((m, cur, s) => {
+    cur.delete()
+    s.put({
+      ...m, owner: n, mid: n + m.mid.slice(o.length),
+      reactions: rekey(m.reactions, o, n),
+      q: m.q && m.q.from.toLowerCase() === o ? { ...m.q, from: newName } : m.q,
+    })
+  }, o)
+  moveKeys(`read:${o}:`, `read:${n}:`, true)
+  moveKeys(`verified:${o}:`, `verified:${n}:`, true)
+}
+
+// কন্টাক্ট username বদলালে: তার সব মেসেজ নতুন নামের চ্যাটে সরানো
+export async function renamePeer(owner: string, oldPeer: string, newPeer: string) {
+  const ow = owner.toLowerCase(), o = oldPeer.toLowerCase(), n = newPeer.toLowerCase()
+  if (o === n) return
+  await rewrite((m, cur, s) => {
+    let u: StoredMsg = m
+    if (m.peer.toLowerCase() === o) {
+      const oldIn = `${ow}|in|${o}|`
+      u = {
+        ...u, peer: newPeer, reactions: rekey(u.reactions, o, n),
+        mid: m.mid.startsWith(oldIn) ? `${ow}|in|${n}|` + m.mid.slice(oldIn.length) : m.mid,
+      }
+    }
+    if (u.q && u.q.from.toLowerCase() === o) u = { ...u, q: { ...u.q, from: newPeer } }
+    if (u === m) return
+    if (u.mid !== m.mid) cur.delete()
+    s.put(u)
+  }, ow)
+  moveKeys(`read:${ow}:${o}`, `read:${ow}:${n}`, false)
+  moveKeys(`verified:${ow}:${o}`, `verified:${ow}:${n}`, false)
+}

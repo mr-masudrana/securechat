@@ -4,6 +4,6 @@ export type Me = {
   email: string | null; avatar: string | null; needsProfile: boolean
 }
 export type Session = {
-  id: string; username: string; fullName: string; avatar: string | null
+  id: string; username: string; fullName: string; email: string | null; avatar: string | null
   token: string; identity: Identity
 }

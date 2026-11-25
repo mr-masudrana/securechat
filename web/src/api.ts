@@ -16,13 +16,18 @@ export async function call(path: string, method: string, body?: unknown, token?:
 }
 
 export async function uploadBlob(to: string, data: ArrayBuffer, token: string): Promise<string> {
-  const res = await fetch(BASE + '/api/media?to=' + encodeURIComponent(to), {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream' },
-    body: data,
-  })
+  let res: Response
+  try {
+    res = await fetch(BASE + '/api/media?to=' + encodeURIComponent(to), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream' },
+      body: data,
+    })
+  } catch {
+    throw new Error('আপলোডে নেটওয়ার্ক সমস্যা হয়েছে, আবার চেষ্টা করুন')
+  }
   const j = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(j.error || 'আপলোড ব্যর্থ হয়েছে')
+  if (!res.ok) throw new Error((j.error || 'আপলোড ব্যর্থ হয়েছে') + ` (${res.status})`)
   return j.id
 }
 

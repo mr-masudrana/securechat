@@ -17,7 +17,7 @@ export default function App() {
     if (me.needsProfile) { setPending({ token, me }); return }
     const identity = await ensureIdentity(me.id, me.username, token)
     setPending(null)
-    setSession({ id: me.id, username: me.username, fullName: me.fullName, avatar: me.avatar, token, identity })
+    setSession({ id: me.id, username: me.username, fullName: me.fullName, email: me.email, avatar: me.avatar, token, identity })
   }
   const safeEnter = (t: string, m: Me) =>
     enter(t, m).catch(() => alert('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন'))
@@ -57,7 +57,11 @@ export default function App() {
         <button onClick={start} className="rounded-lg bg-emerald-600 px-5 py-2">আবার চেষ্টা করুন</button>
       </div>
     )
-  if (session) return <Messenger session={session} onLogout={logout} />
+  if (session) {
+    // username বদলালে key বদলায়, ফলে Messenger নতুন নামে একদম নতুন করে চালু হয়
+    return <Messenger key={session.username} session={session} onLogout={logout}
+      onSession={p => setSession(s => (s ? { ...s, ...p } : s))} />
+  }
   if (pending) return <ProfileSetup me={pending.me} token={pending.token} onDone={m => safeEnter(pending.token, m)} onLogout={logout} />
   return <AuthScreen onAuth={safeEnter} />
 }

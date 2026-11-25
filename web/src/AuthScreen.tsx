@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { call } from './api'
 import type { Me } from './types'
+import Icon from './Icon'
 
 type Mode = 'login' | 'register' | 'verify' | 'forgot' | 'reset'
 const TITLES: Record<Mode, string> = {
@@ -78,7 +79,7 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
   return (
     <div className="min-h-dvh grid place-items-center bg-slate-900 text-white p-4">
       <div className="w-full max-w-sm space-y-3">
-        <h1 className="text-2xl font-bold">🔒 SecureChat</h1>
+        <h1 className="text-2xl font-bold flex items-center gap-2"><Icon name="lock" className="size-6 text-emerald-400" /> SecureChat</h1>
         <p className="text-slate-400 text-sm">{TITLES[mode]}</p>
         {info && <p className="text-emerald-400 text-sm">{info}</p>}
 
@@ -124,7 +125,9 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
             <button onClick={() => go('register')}>নতুন অ্যাকাউন্ট খুলুন</button>
             <button onClick={() => go('forgot')}>পাসওয়ার্ড ভুলে গেছেন?</button>
           </>}
-          {mode !== 'login' && <button onClick={() => go('login')}>← লগইনে ফিরুন</button>}
+          {mode !== 'login' && (
+            <button onClick={() => go('login')} className="flex items-center gap-1"><Icon name="back" className="size-4" /> লগইনে ফিরুন</button>
+          )}
         </div>
       </div>
     </div>

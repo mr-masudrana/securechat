@@ -17,3 +17,7 @@ export function beep() {
     o.stop(t + 0.26)
   } catch { /* শব্দ না হলে ক্ষতি নেই */ }
 }
+
+// প্রাইভেসি: "পড়েছি" রিসিপ্ট (নীল টিক) অন্যকে পাঠানো হবে কিনা
+export const readReceiptsOn = () => localStorage.getItem('pref:readReceipts') !== 'off'
+export const setReadReceipts = (on: boolean) => localStorage.setItem('pref:readReceipts', on ? 'on' : 'off')

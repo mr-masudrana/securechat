@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode, type TouchEvent } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode, type TouchEvent } from 'react'
 import { connect, type Conn } from './socket'
 import { call, downloadBlob, uploadBlob } from './api'
 import {
-  decryptBody, decryptFile, encryptBody, encryptFile, deleteMessage, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
+  decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
   MAX_FILE, patchMessage, safetyNumber, saveMessage, type Body, type FileMeta, type Quote, type StoredMsg,
 } from './crypto'
-import { fmtDur, fmtSize, isAudio, isImg, makeThumb, previewText, resizeAvatar, safeType } from './media'
+import { fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType } from './media'
 import { useProfile } from './profiles'
-import { beep, soundOn } from './notify'
+import Icon, { type IconName } from './Icon'
+import { beep, readReceiptsOn, soundOn } from './notify'
 import { syncPush } from './push'
 import NotifDialog from './NotifDialog'
+import { AccountDialog, PrivacyDialog } from './MenuDialogs'
 import type { Session } from './types'
 
 const AUTO_MAX = 10 * 1024 * 1024
@@ -36,10 +38,26 @@ const mergeAll = (cur: StoredMsg[], add: StoredMsg[]) => {
   return [...cur, ...add.filter(x => !ids.has(x.mid))].sort((a, b) => a.ts - b.ts)
 }
 const hhmm = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-const listTime = (ts: number) => {
+// চ্যাটের তারিখ-লেবেল: আজ / গতকাল / সপ্তাহের বার / পুরো তারিখ
+const dayKey = (ts: number) => new Date(ts).toDateString()
+function dayLabel(ts: number) {
   const d = new Date(ts)
-  return d.toDateString() === new Date().toDateString()
-    ? hhmm(ts) : d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const diff = Math.round((start(new Date()) - start(d)) / 86400000)
+  if (diff === 0) return 'আজ'
+  if (diff === 1) return 'গতকাল'
+  if (diff > 1 && diff < 7) return d.toLocaleDateString('bn-BD', { weekday: 'long' })
+  return d.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })
+}
+const DayChip = ({ ts }: { ts: number }) => (
+  <div className="flex justify-center py-2">
+    <span className="px-3 py-1 rounded-lg bg-slate-800 text-xs text-slate-300">{dayLabel(ts)}</span>
+  </div>
+)
+// চ্যাট লিস্টে: আজ হলে সময়, গতকাল হলে "গতকাল", নইলে তারিখ
+const listTime = (ts: number) => {
+  const l = dayLabel(ts)
+  return l === 'আজ' ? hhmm(ts) : l === 'গতকাল' ? l : new Date(ts).toLocaleDateString('bn-BD', { day: 'numeric', month: 'short' })
 }
 const Avatar = ({ name, src }: { name: string; src?: string | null }) => src
   ? <img src={src} alt="" className="size-11 shrink-0 rounded-full object-cover" />
@@ -54,9 +72,12 @@ const PeerAvatar = ({ peer, token }: { peer: string; token: string }) => {
 }
 
 const Tick = ({ s }: { s?: Status }) => (
-  <span className="ml-1">
-    {s === 'sending' ? '🕓' : s === 'failed' ? <span className="text-red-300">⚠</span>
-      : s === 'read' ? <span className="text-sky-300">✓✓</span> : s === 'delivered' ? '✓✓' : '✓'}
+  <span className="ml-1 inline-flex align-middle">
+    {s === 'sending' ? <Icon name="clock" className="size-3" />
+      : s === 'failed' ? <Icon name="alert" className="size-3 text-red-300" />
+      : s === 'read' ? <Icon name="checks" className="size-3.5 text-sky-300" />
+      : s === 'delivered' ? <Icon name="checks" className="size-3.5" />
+      : <Icon name="check" className="size-3.5" />}
   </span>
 )
 
@@ -66,7 +87,9 @@ const fromHash = () => {
   try { return m ? decodeURIComponent(m[1]) : null } catch { return null }
 }
 
-export default function Messenger({ session, onLogout }: { session: Session; onLogout: () => void }) {
+export default function Messenger({ session, onLogout, onSession }: {
+  session: Session; onLogout: () => void; onSession: (p: Partial<Session>) => void
+}) {
   const { username, token, identity } = session
   const owner = username.toLowerCase()
   const [msgs, setMsgs] = useState<StoredMsg[]>([])
@@ -79,6 +102,43 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
   const [dl, setDl] = useState<DlState>({})
   const [myAvatar, setMyAvatar] = useState(session.avatar)
   const [showNotif, setShowNotif] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [showAccount, setShowAccount] = useState(false)
+  const [showPrivacy, setShowPrivacy] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const changeUsername = async (name: string, current: string) => {
+    const r = await call('/api/account/username', 'POST', { username: name, current }, token)
+    await renameOwner(username, r.username) // এই ডিভাইসের ইতিহাস নতুন নামে সরানো
+    if (r.username.toLowerCase() !== owner)
+      localStorage.setItem('rename-pending:' + r.username.toLowerCase(), JSON.stringify({ old: username }))
+    onSession({ username: r.username }) // অ্যাপ নতুন নামে আবার চালু হবে
+  }
+  // নতুন নামে চালু হয়ে সব কন্টাক্টকে (এনক্রিপ্টেড কন্ট্রোল মেসেজে) জানানো
+  useEffect(() => {
+    const key = 'rename-pending:' + owner
+    const raw = localStorage.getItem(key)
+    if (!raw || !online || !loaded) return
+    let old = ''
+    try { old = JSON.parse(raw).old } catch { localStorage.removeItem(key); return }
+    const peers = [...new Set(msgsRef.current.map(m => m.peer))]
+    void (async () => {
+      let ok = true
+      for (const p of peers) ok = (await sendControl(p, { rn: { old } })) && ok
+      if (ok) localStorage.removeItem(key)
+    })()
+  }, [online, loaded])
+  const clearAll = async () => {
+    await clearMessages(username)
+    setMsgs([])
+    if (activeRef.current) closeChat()
+  }
+  const goMenu = (k: 'account' | 'privacy' | 'settings' | 'logout') => {
+    setMenuOpen(false)
+    if (k === 'account') setShowAccount(true)
+    else if (k === 'privacy') setShowPrivacy(true)
+    else if (k === 'settings') setShowNotif(true)
+    else onLogout()
+  }
   const changeAvatar = async (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     e.target.value = ''
@@ -134,7 +194,10 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
     const todo = msgsRef.current.filter(m =>
       !m.mine && !m.failed && !m.rd && m.peer.toLowerCase() === peer.toLowerCase())
     if (!todo.length) return
-    todo.forEach(m => { queueReceipt(peer, 'r', m.mid.split('|')[3]); void patchMessage(m.mid, { rd: true }) })
+    todo.forEach(m => {
+      if (readReceiptsOn()) queueReceipt(peer, 'r', m.mid.split('|')[3]) // প্রাইভেসি সেটিং
+      void patchMessage(m.mid, { rd: true })
+    })
     const ids = new Set(todo.map(m => m.mid))
     setMsgs(l => l.map(x => (ids.has(x.mid) ? { ...x, rd: true } : x)))
   }
@@ -216,6 +279,19 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
         cur.file || cur.deleted || ts - cur.ts > EDIT_WINDOW + 5 * 60_000 ? cur : { ...cur, text: b.ed!.t, edited: true })
     } else if (b.dl) {
       await apply(`${owner}|in|${a}|${b.dl.id}`, cur => (cur.deleted ? cur : tomb(cur)))
+    } else if (b.rn) {
+      // কন্টাক্ট username বদলেছে। শুধু তখনই মানি যখন তার কী আগের নামের কী-র সঙ্গে হুবহু মেলে
+      const old = b.rn.old.toLowerCase()
+      const known = localStorage.getItem('pk:' + old)
+      if (old === a || !known || !msgsRef.current.some(m => m.peer.toLowerCase() === old)) return
+      const u = await lookupUser(actor, token).catch(() => null)
+      if (!u?.publicKey || u.publicKey !== known) return
+      await renamePeer(owner, old, actor)
+      setMsgs(await loadMessages(username))
+      if (activeRef.current?.toLowerCase() === old) {
+        history.replaceState({ chat: actor }, '', '#c/' + encodeURIComponent(actor))
+        setActive(actor)
+      }
     }
   }
 
@@ -294,6 +370,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
     let alive = true
     loadMessages(username).then(stored => {
       if (!alive) return
+      setLoaded(true)
       setMsgs(cur => mergeAll(cur, stored))
       stored.filter(autoable).forEach(m => void downloadFile(m))
     })
@@ -308,7 +385,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
             void setStatus(`${owner}|out|${id}`, body.c.k === 'r' ? 'read' : 'delivered', m.from)
           return true
         }
-        if (body && (body.x || body.pn || body.ed || body.dl)) { await applyControl(body, m.from, m.ts); return true }
+        if (body && (body.x || body.pn || body.ed || body.dl || body.rn)) { await applyControl(body, m.from, m.ts); return true }
         const mid = `${owner}|in|${m.from.toLowerCase()}|${m.id}`
         // একই মেসেজ আবার এলে পুরনোটা (ডাউনলোড করা ফাইলসহ) নষ্ট না করে শুধু ack
         if (await getMessage(mid)) return true
@@ -316,7 +393,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
         const live = isActive && document.visibilityState === 'visible'
         const msg: StoredMsg = {
           mid, owner, peer: m.from, mine: false, ts: m.ts,
-          text: body ? body.t ?? '' : '🔒 ডিক্রিপ্ট করা যায়নি',
+          text: body ? body.t ?? '' : 'ডিক্রিপ্ট করা যায়নি',
           failed: body === null, file: body?.f, rd: live, q: body?.q, fw: !!body?.fw,
         }
         await saveMessage(msg) // সেভ শেষ হলেই ack যাবে
@@ -326,7 +403,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
         if (autoable(msg)) void downloadFile(msg)
         if (!msg.failed) {
           queueReceipt(m.from, 'd', m.id)
-          if (live) queueReceipt(m.from, 'r', m.id)
+          if (live && readReceiptsOn()) queueReceipt(m.from, 'r', m.id)
         }
         return true
       },
@@ -415,6 +492,7 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
   }
 
   const sendFile = async (peer: string, file: File, caption: string, dur?: number, q?: Quote, fw?: boolean) => {
+    if (!fw && file.type.startsWith('image/')) file = await prepareImage(file) // ছোট করে JPEG
     if (file.size === 0) { setToast('ফাইলটা খালি'); return false }
     if (file.size > MAX_FILE) { setToast('ফাইল সর্বোচ্চ ২০ MB হতে পারবে'); return false }
     if (!conn.current?.isOpen()) { setToast('কানেকশন নেই, একটু পরে চেষ্টা করুন'); return false }
@@ -454,23 +532,36 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
   return (
     <div className="h-dvh flex bg-slate-900 text-white">
       {/* ---- চ্যাট লিস্ট ---- */}
-      <aside className={`${active ? 'hidden md:flex' : 'flex'} w-full md:w-80 flex-col border-r border-slate-800`}>
+      <aside className={`${active ? 'hidden md:flex' : 'flex'} relative w-full md:w-80 flex-col border-r border-slate-800`}>
         <header className="flex items-center gap-2 p-3 border-b border-slate-800">
-          <label className="cursor-pointer" title="প্রোফাইল ছবি বদলান">
-            <Avatar name={username} src={myAvatar} />
-            <input type="file" accept="image/*" className="hidden" onChange={changeAvatar} />
-          </label>
+          <button onClick={() => setShowAccount(true)} title="অ্যাকাউন্ট"><Avatar name={username} src={myAvatar} /></button>
           <div className="flex-1 min-w-0">
-            <p className="font-bold">🔒 SecureChat</p>
+            <p className="font-bold flex items-center gap-1"><Icon name="lock" className="size-4 text-emerald-400" /> SecureChat</p>
             <p className="text-xs text-slate-400">
-              @{username} <span className={online ? 'text-emerald-400' : 'text-red-400'}>● {online ? 'অনলাইন' : 'অফলাইন'}</span>
+              @{username} <span className={online ? 'text-emerald-400' : 'text-red-400'}><i className="inline-block size-2 rounded-full bg-current mr-1" />{online ? 'অনলাইন' : 'অফলাইন'}</span>
             </p>
           </div>
-          <button onClick={() => setNewChat(true)} className="size-9 rounded-full bg-emerald-600 text-xl">+</button>
-          <button onClick={() => setShowNotif(true)} className="size-9 text-lg" title="নোটিফিকেশন">🔔</button>
-          <button onClick={onLogout} className="text-xs text-slate-400 px-2">লগআউট</button>
+          <button onClick={() => setMenuOpen(o => !o)} className="size-9 grid place-items-center rounded-full text-slate-300 hover:bg-slate-800" title="মেনু">
+            <Icon name="dots" className="size-6" />
+          </button>
         </header>
-        <div className="flex-1 overflow-y-auto">
+        {menuOpen && (
+          <>
+            <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
+            <div className="absolute right-2 top-14 z-40 w-52 rounded-xl bg-slate-800 border border-slate-700 shadow-xl py-1">
+              {([['account', 'user', 'অ্যাকাউন্ট'], ['privacy', 'lock', 'প্রাইভেসি'], ['settings', 'sliders', 'সেটিংস']] as const).map(([k, ic, label]) => (
+                <button key={k} onClick={() => goMenu(k)} className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-slate-700">
+                  <Icon name={ic} className="size-5 text-slate-300" />{label}
+                </button>
+              ))}
+              <div className="my-1 border-t border-slate-700" />
+              <button onClick={() => goMenu('logout')} className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-red-300 hover:bg-slate-700">
+                <Icon name="logout" className="size-5" />লগআউট
+              </button>
+            </div>
+          </>
+        )}
+        <div className="flex-1 overflow-y-auto pb-24">
           {convos.length === 0 && (
             <p className="p-6 text-center text-slate-400 text-sm">কোনো চ্যাট নেই। উপরের + চেপে নতুন চ্যাট শুরু করুন।</p>
           )}
@@ -496,6 +587,10 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
             </button>
           ))}
         </div>
+        <button onClick={() => setNewChat(true)} title="নতুন চ্যাট"
+          className="absolute bottom-6 right-5 z-10 size-14 rounded-full bg-emerald-600 shadow-lg shadow-black/40 grid place-items-center active:scale-95 transition-transform">
+          <Icon name="plus" className="size-7" />
+        </button>
       </aside>
 
       {/* ---- চ্যাট স্ক্রিন ---- */}
@@ -523,6 +618,11 @@ export default function Messenger({ session, onLogout }: { session: Session; onL
         </div>
       )}
       {showNotif && <NotifDialog token={token} onClose={() => setShowNotif(false)} />}
+      {showAccount && (
+        <AccountDialog session={session} avatar={myAvatar} onAvatar={changeAvatar} onClose={() => setShowAccount(false)}
+          onName={f => onSession({ fullName: f })} onEmail={e => onSession({ email: e })} onUsername={changeUsername} />
+      )}
+      {showPrivacy && <PrivacyDialog identity={identity} onClearAll={clearAll} onClose={() => setShowPrivacy(false)} />}
       {toast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 px-4 py-2 rounded-lg text-sm">{toast}</div>
       )}
@@ -537,7 +637,7 @@ function Voice({ url, dur }: { url: string; dur: number }) {
   const toggle = () => { const el = a.current; if (el) playing ? el.pause() : el.play().catch(() => {}) }
   return (
     <div className="flex items-center gap-2 min-w-52">
-      <button onClick={toggle} className="size-9 shrink-0 rounded-full bg-white/20">{playing ? '❚❚' : '▶'}</button>
+      <button onClick={toggle} className="size-9 shrink-0 rounded-full bg-white/20 grid place-items-center"><Icon name={playing ? 'pause' : 'play'} className="size-4" /></button>
       <div className="flex-1 h-1.5 rounded bg-white/20">
         <div className="h-full rounded bg-white" style={{ width: dur ? Math.min(100, (t / dur) * 100) + '%' : '0%' }} />
       </div>
@@ -572,19 +672,19 @@ function Media({ m, state, onDownload }: {
         : f.th && <img src={f.th} alt="" className="rounded-lg max-h-72 max-w-full blur-sm" />)}
       {!(audio && url) && (
         <p className="text-sm break-all">
-          {audio ? '🎤 ভয়েস মেসেজ' : '📎 ' + f.n}{' '}
+          <span className="inline-flex items-center gap-1"><Icon name={audio ? 'mic' : 'file'} className="size-4 shrink-0" />{audio ? 'ভয়েস মেসেজ' : f.n}</span>{' '}
           <span className="text-white/60">· {audio ? fmtDur(f.d ?? 0) : fmtSize(f.s)}</span>
         </p>
       )}
       {m.blob ? (
-        !audio && <a href={url} download={f.n} className="text-xs underline">⬇ সেভ করুন</a>
+        !audio && <a href={url} download={f.n} className="text-xs underline inline-flex items-center gap-1"><Icon name="download" className="size-3.5" /> সেভ করুন</a>
       ) : m.gone ? (
         <span className="text-xs text-red-300">ফাইলের মেয়াদ শেষ, আর পাওয়া যাবে না</span>
       ) : state === 'loading' ? (
         <span className="text-xs">ডাউনলোড হচ্ছে…</span>
       ) : (
         <button onClick={() => onDownload(m)} className="text-xs underline">
-          {state === 'error' ? 'আবার চেষ্টা করুন' : '⬇ ডাউনলোড'}
+          <span className="inline-flex items-center gap-1"><Icon name="download" className="size-3.5" />{state === 'error' ? 'আবার চেষ্টা করুন' : 'ডাউনলোড'}</span>
         </button>
       )}
     </div>
@@ -607,6 +707,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const [verified, setVerified] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const imgRef = useRef<HTMLInputElement>(null)
   const [rec, setRec] = useState(false)
   const [secs, setSecs] = useState(0)
   const mr = useRef<MediaRecorder | null>(null)
@@ -630,11 +731,17 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const canEdit = (m: StoredMsg) =>
     m.mine && !m.file && !m.deleted && !!m.text && Date.now() - m.ts < EDIT_WINDOW
   const jump = (mid: string) => {
-    const el = document.getElementById('m-' + mid)
-    if (!el) return
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    el.classList.add('bg-white/10')
-    setTimeout(() => el.classList.remove('bg-white/10'), 1200)
+    const idx = list.findIndex(m => m.mid === mid)
+    if (idx < 0) return
+    const go = () => {
+      const el = document.getElementById('m-' + mid)
+      if (!el) return
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('bg-white/10')
+      setTimeout(() => el.classList.remove('bg-white/10'), 1200)
+    }
+    const need = list.length - idx + 3 // পুরনো মেসেজে যেতে হলে আগে সেটা লোড করে নিই
+    if (need > limit) { setLimit(need); setTimeout(go, 80) } else go()
   }
   const startReply = (m: StoredMsg) => { if (!m.deleted) { setEditing(null); setReplyTo(m) } }
   const doAct = (m: StoredMsg, k: string) => {
@@ -694,7 +801,52 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   }, [rec])
   useEffect(() => () => { cancelled.current = true; if (mr.current?.state === 'recording') mr.current.stop() }, [])
 
-  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [list.length])
+  // ---- স্ক্রোল: নিচে থাকলে নতুন মেসেজে নিচে যায়, উপরে পড়ার সময় জায়গায় থাকে ----
+  const listRef = useRef<HTMLDivElement>(null)
+  const atBottom = useRef(true)
+  const lastLen = useRef(0)
+  const anchor = useRef<number | null>(null)
+  const loadingRef = useRef(false)
+  const [limit, setLimit] = useState(40) // প্রথমে শেষ ৪০টি দেখানো হয়, উপরে গেলে ৩০টি করে বাড়ে
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [showDown, setShowDown] = useState(false)
+  const [below, setBelow] = useState(0)
+  const hasMore = list.length > limit
+  const shown = hasMore ? list.slice(list.length - limit) : list
+
+  useLayoutEffect(() => {
+    const last = list[list.length - 1]
+    if (list.length > lastLen.current) {
+      if (atBottom.current || last?.mine) {
+        bottom.current?.scrollIntoView({ behavior: lastLen.current === 0 ? 'auto' : 'smooth' })
+        setBelow(0)
+      } else if (last && !last.mine) setBelow(n => n + list.length - lastLen.current)
+    }
+    lastLen.current = list.length
+  }, [list.length])
+
+  const loadOlder = () => {
+    const el = listRef.current
+    if (!el || loadingRef.current) return
+    loadingRef.current = true
+    setLoadingOlder(true)
+    setTimeout(() => { anchor.current = el.scrollHeight; setLimit(l => l + 30) }, 250) // ধীরে ধীরে
+  }
+  useLayoutEffect(() => { // নতুন পুরনো মেসেজ উপরে বসলেও চোখের জায়গা একই থাকে
+    const el = listRef.current
+    if (anchor.current !== null && el) { el.scrollTop += el.scrollHeight - anchor.current; anchor.current = null }
+    loadingRef.current = false
+    setLoadingOlder(false)
+  }, [limit])
+  const onScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+    atBottom.current = dist < 120
+    setShowDown(dist > 300)
+    if (dist < 120) setBelow(0)
+    if (el.scrollTop < 80 && hasMore) loadOlder()
+  }
 
   useEffect(() => {
     lookupUser(peer, session.token).then(u => {
@@ -726,39 +878,46 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   return (
     <>
       <header className="flex items-center gap-3 p-3 border-b border-slate-800">
-        <button onClick={onBack} className="md:hidden text-2xl px-1">←</button>
+        <button onClick={onBack} className="md:hidden px-1 text-slate-300"><Icon name="back" className="size-6" /></button>
         <PeerAvatar peer={peer} token={session.token} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold truncate">{prof?.fullName || '@' + peer}</p>
-          <p className="text-xs text-slate-400">{prof ? '@' + peer + ' · ' : ''}{verified ? '✅ ভেরিফাইড' : '🔒 এন্ড-টু-এন্ড এনক্রিপ্টেড'}</p>
+          <p className="text-xs text-slate-400 flex items-center gap-1">{prof ? '@' + peer + ' · ' : ''}{verified ? <><Icon name="shield" className="size-3.5 text-emerald-400" />ভেরিফাইড</> : <><Icon name="lock" className="size-3.5" />এন্ড-টু-এন্ড এনক্রিপ্টেড</>}</p>
         </div>
         <button onClick={() => setSafety(true)} className="text-sm text-emerald-400 px-2">নিরাপত্তা</button>
       </header>
 
       {keyChanged && (
         <div className="bg-red-900 text-sm p-3">
-          ⚠️ @{peer}-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। "নিরাপত্তা" থেকে সেফটি নাম্বার মিলিয়ে নিন।
+          <Icon name="alert" className="size-4 inline -mt-0.5" /> @{peer}-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। "নিরাপত্তা" থেকে সেফটি নাম্বার মিলিয়ে নিন।
         </div>
       )}
 
       {pins.length > 0 && (
         <button onClick={() => { jump(pins[pinIdx % pins.length].mid); setPinIdx(i => i + 1) }}
           className="flex items-center gap-2 px-3 py-2 text-sm text-left bg-slate-800/70 border-b border-slate-800">
-          <span>📌</span>
+          <Icon name="pin" className="size-4 shrink-0" />
           <span className="flex-1 truncate text-slate-300">{previewText(pins[pinIdx % pins.length])}</span>
           {pins.length > 1 && <span className="text-xs text-slate-400">{(pinIdx % pins.length) + 1}/{pins.length}</span>}
         </button>
       )}
-      <div className="flex-1 overflow-y-auto p-3 space-y-1">
+      <div className="relative flex-1 min-h-0 flex flex-col">
+      <div ref={listRef} onScroll={onScroll} className="flex-1 overflow-y-auto p-3 space-y-1">
+        {loadingOlder && <p className="text-center text-xs text-slate-500 py-2">পুরনো মেসেজ লোড হচ্ছে…</p>}
+        {hasMore && !loadingOlder && (
+          <button onClick={loadOlder} className="block mx-auto text-xs text-emerald-400 py-2">আরও পুরনো মেসেজ দেখুন</button>
+        )}
         {list.length === 0 && (
           <p className="text-center text-xs text-slate-500 py-6">এখনো কোনো মেসেজ নেই। প্রথম মেসেজটা পাঠান।</p>
         )}
-        {list.map(m => (
-          <SwipeRow key={m.mid} id={'m-' + m.mid} mine={m.mine}
+        {shown.map((m, i) => (
+          <Fragment key={m.mid}>
+            {(i === 0 || dayKey(shown[i - 1].ts) !== dayKey(m.ts)) && <DayChip ts={m.ts} />}
+          <SwipeRow id={'m-' + m.mid} mine={m.mine}
             onReply={m.deleted ? undefined : () => startReply(m)} onMenu={() => setMenu(m)}>
             <div className={`rounded-2xl px-3 py-2 break-words space-y-1 ${
               m.failed ? 'bg-red-900' : m.mine ? 'bg-emerald-700' : 'bg-slate-700'} ${m.pinned ? 'ring-1 ring-amber-400/70' : ''}`}>
-              {m.fw && <p className="text-[11px] text-white/60 italic">↪ ফরওয়ার্ড করা</p>}
+              {m.fw && <p className="text-[11px] text-white/60 italic flex items-center gap-1"><Icon name="forward" className="size-3" /> ফরওয়ার্ড করা</p>}
               {m.q && (
                 <button onClick={() => jump(qMid(m.q!))}
                   className="block w-full text-left border-l-4 border-emerald-300 bg-black/20 rounded px-2 py-1">
@@ -767,7 +926,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
                 </button>
               )}
               {m.deleted ? (
-                <p className="italic text-white/60 text-sm">🚫 মেসেজটি মুছে ফেলা হয়েছে</p>
+                <p className="italic text-white/60 text-sm flex items-center gap-1.5"><Icon name="ban" className="size-4" /> মেসেজটি মুছে ফেলা হয়েছে</p>
               ) : (
                 <>
                   {m.file && <Media m={m} state={dl[m.mid]} onDownload={onDownload} />}
@@ -775,7 +934,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
                 </>
               )}
               <p className="text-[10px] text-white/60 text-right">
-                {m.pinned && '📌 '}{m.edited && !m.deleted && 'এডিটেড · '}{hhmm(m.ts)}{m.mine && !m.deleted && <Tick s={m.status} />}
+                {m.pinned && <Icon name="pin" className="size-3 inline mr-1 -mt-0.5" />}{m.edited && !m.deleted && 'এডিটেড · '}{hhmm(m.ts)}{m.mine && !m.deleted && <Tick s={m.status} />}
               </p>
             </div>
             {m.reactions && Object.keys(m.reactions).length > 0 && (
@@ -784,45 +943,60 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
               </div>
             )}
           </SwipeRow>
+          </Fragment>
         ))}
         <div ref={bottom} />
+      </div>
+      {showDown && (
+        <button onClick={() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }); setBelow(0) }} title="নিচে যান"
+          className="absolute bottom-3 right-3 size-11 rounded-full bg-slate-700 shadow-lg shadow-black/40 grid place-items-center active:scale-95 transition-transform">
+          <Icon name="down" className="size-6" />
+          {below > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 min-w-5 h-5 px-1 rounded-full bg-emerald-600 text-[11px] grid place-items-center">{below}</span>
+          )}
+        </button>
+      )}
       </div>
 
       {(replyTo || editing) && (
         <div className="flex items-center gap-2 px-3 pt-2 border-t border-slate-800">
           <div className="flex-1 min-w-0 border-l-4 border-emerald-500 pl-2">
-            <p className="text-xs text-emerald-400">
-              {editing ? '✏️ মেসেজ এডিট করছেন' : '↩ উত্তর: ' + (replyTo!.mine ? 'আপনি' : prof?.fullName || '@' + peer)}
+            <p className="text-xs text-emerald-400 flex items-center gap-1">
+              <Icon name={editing ? 'edit' : 'reply'} className="size-3.5" />
+              {editing ? 'মেসেজ এডিট করছেন' : 'উত্তর: ' + (replyTo!.mine ? 'আপনি' : prof?.fullName || '@' + peer)}
             </p>
             <p className="text-sm text-slate-300 truncate">{previewText((editing ?? replyTo)!)}</p>
           </div>
           <button onClick={() => { setReplyTo(null); if (editing) { setEditing(null); setText('') } }}
-            className="text-slate-400 px-2">✕</button>
+            className="text-slate-400 px-2"><Icon name="x" /></button>
         </div>
       )}
       {sending && <p className="px-4 pb-1 text-xs text-emerald-400">এনক্রিপ্ট করে পাঠানো হচ্ছে…</p>}
       {rec ? (
         <div className="flex items-center gap-3 p-3 border-t border-slate-800">
-          <button onClick={() => stopRec(true)} className="size-12 shrink-0 rounded-full bg-slate-800 text-xl">🗑</button>
+          <button onClick={() => stopRec(true)} className="size-12 shrink-0 rounded-full bg-slate-800 grid place-items-center"><Icon name="trash" /></button>
           <div className="flex-1 flex items-center gap-2 text-red-400">
-            <span className="animate-pulse">●</span>
+            <span className="size-2.5 rounded-full bg-red-500 animate-pulse" />
             <span className="tabular-nums">{fmtDur(secs)}</span>
             <span className="text-xs text-slate-400">রেকর্ড হচ্ছে…</span>
           </div>
-          <button onClick={() => stopRec()} className="size-12 shrink-0 rounded-full bg-emerald-600 text-xl">➤</button>
+          <button onClick={() => stopRec()} className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center"><Icon name="send" /></button>
         </div>
       ) : (
         <div className="flex gap-2 p-3 border-t border-slate-800">
           <input ref={fileRef} type="file" className="hidden" onChange={pick} />
-          <button onClick={() => fileRef.current?.click()} disabled={sending}
-            className="size-12 shrink-0 rounded-full bg-slate-800 text-xl disabled:opacity-50">📎</button>
+          <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={pick} />
+          <button onClick={() => imgRef.current?.click()} disabled={sending} title="ছবি"
+            className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="image" /></button>
+          <button onClick={() => fileRef.current?.click()} disabled={sending} title="ফাইল"
+            className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="clip" /></button>
           <input value={text} onChange={e => setText(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && submit()} placeholder="মেসেজ লিখুন"
             className="flex-1 min-w-0 rounded-full bg-slate-800 px-4 py-3 outline-none focus:ring-2 ring-emerald-500" />
           {text.trim()
-            ? <button onClick={submit} className="rounded-full bg-emerald-600 px-5 font-semibold">পাঠান</button>
+            ? <button onClick={submit} className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center" title="পাঠান"><Icon name="send" /></button>
             : <button onClick={startRec} disabled={sending}
-                className="size-12 shrink-0 rounded-full bg-emerald-600 text-xl disabled:opacity-50">🎤</button>}
+                className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center disabled:opacity-50" title="ভয়েস মেসেজ"><Icon name="mic" /></button>}
         </div>
       )}
 
@@ -932,7 +1106,7 @@ function SwipeRow({ id, mine, onReply, onMenu, children }: {
     <div id={id} className={`relative flex rounded-lg transition-colors ${mine ? 'justify-end' : ''}`}
       onTouchStart={start} onTouchMove={move} onTouchEnd={end} onTouchCancel={end}
       onContextMenu={e => { e.preventDefault(); onMenu() }}>
-      {dx > 16 && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xl text-emerald-400">↩</span>}
+      {dx > 16 && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-emerald-400"><Icon name="reply" className="size-6" /></span>}
       <div className={`max-w-[80%] flex flex-col select-none [-webkit-touch-callout:none] ${mine ? 'items-end' : 'items-start'}`}
         style={dx ? { transform: `translateX(${dx}px)` } : undefined}>
         {children}
@@ -945,12 +1119,12 @@ function MsgMenu({ m, canEdit, myReaction, onReact, onAct, onClose }: {
   m: StoredMsg; canEdit: boolean; myReaction?: string
   onReact: (e: string) => void; onAct: (k: string) => void; onClose: () => void
 }) {
-  const rows: [string, string][] = []
-  if (!m.deleted) rows.push(['reply', '↩ উত্তর দিন'])
-  if (!m.deleted && m.text) rows.push(['copy', '📋 কপি'])
-  if (!m.deleted) rows.push(['forward', '↪ ফরওয়ার্ড'], ['pin', m.pinned ? '📌 আনপিন' : '📌 পিন করুন'])
-  if (canEdit) rows.push(['edit', '✏️ এডিট'])
-  rows.push(['delete', '🗑 ডিলিট'])
+  const rows: [string, IconName, string][] = []
+  if (!m.deleted) rows.push(['reply', 'reply', 'উত্তর দিন'])
+  if (!m.deleted && m.text) rows.push(['copy', 'copy', 'কপি'])
+  if (!m.deleted) rows.push(['forward', 'forward', 'ফরওয়ার্ড'], ['pin', 'pin', m.pinned ? 'আনপিন' : 'পিন করুন'])
+  if (canEdit) rows.push(['edit', 'edit', 'এডিট'])
+  rows.push(['delete', 'trash', 'ডিলিট'])
   return (
     <Sheet onClose={onClose}>
       {!m.deleted && (
@@ -961,9 +1135,11 @@ function MsgMenu({ m, canEdit, myReaction, onReact, onAct, onClose }: {
           ))}
         </div>
       )}
-      {rows.map(([k, label]) => (
+      {rows.map(([k, ic, label]) => (
         <button key={k} onClick={() => onAct(k)}
-          className="w-full text-left rounded-lg bg-slate-700/60 px-4 py-3">{label}</button>
+          className="w-full flex items-center gap-3 text-left rounded-lg bg-slate-700/60 px-4 py-3">
+          <Icon name={ic} />{label}
+        </button>
       ))}
     </Sheet>
   )

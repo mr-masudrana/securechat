@@ -96,7 +96,7 @@ async function sendMail(env: Env, to: string, subject: string, text: string) {
   if (!r.ok) { console.error('brevo', r.status, await r.text()); throw new Error('mail: failed') }
 }
 
-type Purpose = 'signup' | 'reset'
+type Purpose = 'signup' | 'reset' | 'email'
 async function issueOtp(env: Env, email: string, purpose: Purpose,
   extra: { full_name?: string; pass_hash?: string; salt?: string }, force: boolean) {
   const row = await env.DB.prepare('SELECT sent_at FROM otps WHERE email = ? AND purpose = ?')
@@ -111,7 +111,7 @@ async function issueOtp(env: Env, email: string, purpose: Purpose,
        full_name = COALESCE(?6, full_name), pass_hash = COALESCE(?7, pass_hash), salt = COALESCE(?8, salt)`)
     .bind(email, purpose, await sha256(code + ':' + email), now + 10 * 60_000, now,
       extra.full_name ?? null, extra.pass_hash ?? null, extra.salt ?? null).run()
-  const what = purpose === 'signup' ? 'অ্যাকাউন্ট ভেরিফিকেশন' : 'পাসওয়ার্ড রিসেট'
+  const what = purpose === 'signup' ? 'অ্যাকাউন্ট ভেরিফিকেশন' : purpose === 'reset' ? 'পাসওয়ার্ড রিসেট' : 'ইমেইল পরিবর্তন'
   await sendMail(env, email, `SecureChat ${what} কোড: ${code}`,
     `আপনার SecureChat ${what} কোড: ${code}\n\nকোডটি ১০ মিনিট পর্যন্ত বৈধ। কাউকে এই কোড দেবেন না।\nআপনি এটা না চাইলে এই ইমেইল উপেক্ষা করুন।\n\nYour SecureChat code: ${code} (valid for 10 minutes)`)
   return 'ok'
@@ -349,6 +349,9 @@ export default {
         if (!user.profile_done) {
           if (!/^[a-zA-Z0-9_]{3,20}$/.test(username || ''))
             return json({ error: 'Username ৩-২০ অক্ষর, শুধু ইংরেজি অক্ষর/সংখ্যা/_' }, 400)
+          const hold = await env.DB.prepare('SELECT user_id FROM username_holds WHERE username = ? AND until > ?')
+            .bind(username, Date.now()).first<{ user_id: string }>()
+          if (hold && hold.user_id !== user.id) return json({ error: 'এই username কিছুদিনের জন্য সংরক্ষিত, অন্য একটা বেছে নিন' }, 409)
           try {
             await env.DB.prepare('UPDATE users SET username = ?, avatar = COALESCE(?, avatar), profile_done = 1 WHERE id = ?')
               .bind(username, hasAvatar ? avatar : null, user.id).run()
@@ -382,6 +385,112 @@ export default {
         return u
           ? json({ username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key })
           : json({ error: 'Not found' }, 404)
+      }
+
+      // ---- অ্যাকাউন্ট বদল: নাম, পাসওয়ার্ড, ইমেইল (কোড দিয়ে), username ----
+      if (pathname.startsWith('/api/account/') && req.method === 'POST') {
+        const user = await authUser(req, env)
+        if (!user || !user.profile_done) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `acct:${user.id}`, 40, 3600)) return json(tooMany, 429)
+        const what = pathname.slice('/api/account/'.length)
+        const b = await readJson(req)
+        const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<any>()
+        const needPw = async (): Promise<Response | null> => {
+          if (await limited(env, `pwtry:${user.id}`, 10, 900)) return json(tooMany, 429)
+          return (await hashPw(String(b.current ?? ''), unb64(row.salt))) === row.pass_hash
+            ? null : json({ error: 'বর্তমান পাসওয়ার্ড ভুল' }, 403)
+        }
+
+        if (what === 'name') {
+          const fullName = String(b.fullName ?? '').trim().replace(/\s+/g, ' ')
+          if (fullName.length < 2 || fullName.length > 60) return json({ error: 'পুরো নাম ২-৬০ অক্ষরের হতে হবে' }, 400)
+          await env.DB.prepare('UPDATE users SET full_name = ? WHERE id = ?').bind(fullName, user.id).run()
+          return json({ ok: true, fullName })
+        }
+
+        if (what === 'password') {
+          const bad = await needPw()
+          if (bad) return bad
+          if (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 200)
+            return json({ error: 'নতুন Password ৮ থেকে ২০০ অক্ষরের হতে হবে' }, 400)
+          const salt = crypto.getRandomValues(new Uint8Array(16))
+          const mine = await sha256((req.headers.get('Authorization') || '').replace('Bearer ', ''))
+          await env.DB.batch([
+            env.DB.prepare('UPDATE users SET pass_hash = ?, salt = ? WHERE id = ?')
+              .bind(await hashPw(b.password, salt), b64(salt), user.id),
+            env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').bind(user.id, mine), // অন্য ডিভাইস লগআউট
+          ])
+          return json({ ok: true })
+        }
+
+        if (what === 'email') {
+          const bad = await needPw()
+          if (bad) return bad
+          const email = cleanEmail(b.email)
+          if (!validEmail(email)) return json({ error: 'ইমেইল ঠিক নেই' }, 400)
+          if (await limited(env, `otp:${email}`, 5, 3600)) return json(tooMany, 429)
+          if (await env.DB.prepare('SELECT 1 FROM users WHERE email = ? AND id != ?').bind(email, user.id).first())
+            return json({ error: 'এই ইমেইল অন্য অ্যাকাউন্টে ব্যবহার হচ্ছে' }, 409)
+          await issueOtp(env, email, 'email', { full_name: user.id }, true) // full_name কলামে ইউজার id রাখা হয়
+          return json({ ok: true })
+        }
+
+        if (what === 'email/verify') {
+          const email = cleanEmail(b.email)
+          const c = await checkOtp(env, email, 'email', b.code)
+          if (!c.ok) return json({ error: c.error }, 400)
+          if (c.row.full_name !== user.id) return json({ error: 'কোডের মেয়াদ শেষ, নতুন কোড নিন' }, 400)
+          try {
+            await env.DB.prepare('UPDATE users SET email = ? WHERE id = ?').bind(email, user.id).run()
+          } catch {
+            return json({ error: 'এই ইমেইল অন্য অ্যাকাউন্টে ব্যবহার হচ্ছে' }, 409)
+          }
+          await env.DB.prepare("DELETE FROM otps WHERE email = ? AND purpose = 'email'").bind(email).run()
+          if (row.email && row.email !== email) { // পুরনো ঠিকানায় সতর্কবার্তা
+            try {
+              await sendMail(env, row.email, 'SecureChat: আপনার ইমেইল বদলানো হয়েছে',
+                `আপনার SecureChat অ্যাকাউন্টের ইমেইল ${email} করা হয়েছে।\nএটা আপনি না করলে এখনই পাসওয়ার্ড রিসেট করুন।`)
+            } catch { /* সতর্কবার্তা না গেলেও বদল বৈধ */ }
+          }
+          return json({ ok: true, email })
+        }
+
+        if (what === 'username') {
+          const bad = await needPw()
+          if (bad) return bad
+          const name = String(b.username ?? '').trim()
+          if (!/^[a-zA-Z0-9_]{3,20}$/.test(name))
+            return json({ error: 'Username ৩-২০ অক্ষর, শুধু ইংরেজি অক্ষর/সংখ্যা/_' }, 400)
+          if (name === row.username) return json({ error: 'এটাই আপনার বর্তমান username' }, 400)
+          const sameLetters = name.toLowerCase() === row.username.toLowerCase() // শুধু বড়-ছোট হাতের বদল
+          if (!sameLetters) {
+            // ব্যর্থ চেষ্টা কোটা খায় না: সফল বদলের সময় তারিখ রাখা হয়
+            const last = await env.DB.prepare('SELECT value FROM config WHERE key = ?')
+              .bind('uname:' + user.id).first<{ value: string }>()
+            const wait = last ? Number(last.value) + 30 * 86400_000 - Date.now() : 0
+            if (wait > 0)
+              return json({ error: `Username মাসে একবার বদলানো যায়। আবার বদলাতে পারবেন ${Math.ceil(wait / 86400_000)} দিন পর` }, 429)
+            const hold = await env.DB.prepare('SELECT user_id FROM username_holds WHERE username = ? AND until > ?')
+              .bind(name, Date.now()).first<{ user_id: string }>()
+            if (hold && hold.user_id !== user.id)
+              return json({ error: 'এই username কিছুদিনের জন্য সংরক্ষিত, অন্য একটা বেছে নিন' }, 409)
+          }
+          try {
+            await env.DB.batch([
+              env.DB.prepare('UPDATE users SET username = ? WHERE id = ?').bind(name, user.id),
+              // পুরনো username ৩০ দিন অন্য কেউ নিতে পারবে না (কন্টাক্টদের চ্যাটে ভুয়া ব্যক্তি ঢোকা ঠেকাতে)
+              ...(sameLetters ? [] : [env.DB.prepare('INSERT OR REPLACE INTO username_holds (username, user_id, until) VALUES (?, ?, ?)')
+                .bind(row.username, user.id, Date.now() + 30 * 86400_000),
+                env.DB.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').bind('uname:' + user.id, String(Date.now()))]),
+              env.DB.prepare('DELETE FROM username_holds WHERE username = ? AND user_id = ?').bind(name, user.id),
+            ])
+          } catch {
+            return json({ error: 'এই username নেওয়া হয়ে গেছে' }, 409)
+          }
+          return json({ ok: true, username: name })
+        }
+
+        return json({ error: 'Not found' }, 404)
       }
 
       if (pathname === '/api/push/key') return json({ key: (await getVapid(env)).pub })
@@ -421,16 +530,23 @@ export default {
           .bind(to).first<{ id: string }>()
         if (!rcpt) return json({ error: 'ইউজার পাওয়া যায়নি' }, 404)
 
-        const len = Number(req.headers.get('Content-Length') || 0)
-        if (!len || len > MAX_UPLOAD) return json({ error: 'ফাইল সর্বোচ্চ ২০ MB হতে পারবে' }, 413)
+        if (!env.MEDIA) return json({ error: 'ফাইল স্টোরেজ (KV) সেটআপ হয়নি: wrangler.jsonc-এ binding "MEDIA" ও namespace ID দিন' }, 503)
+        // কিছু পথে Content-Length আসে না, তাই শুধু তার ওপর নির্ভর না করে বডি পড়ে মাপ দেখি
+        if (Number(req.headers.get('Content-Length') || 0) > MAX_UPLOAD) return json({ error: 'ফাইল সর্বোচ্চ ২০ MB হতে পারবে' }, 413)
         const body = await req.arrayBuffer()
+        if (!body.byteLength) return json({ error: 'ফাইলটা খালি' }, 400)
         if (body.byteLength > MAX_UPLOAD) return json({ error: 'ফাইল সর্বোচ্চ ২০ MB হতে পারবে' }, 413)
 
         const id = crypto.randomUUID()
-        await env.MEDIA.put(id, body, {
-          metadata: { from: user.id, to: rcpt.id },
-          expirationTtl: 30 * 24 * 3600, // ৩০ দিনে নিজে মুছে যাবে
-        })
+        try {
+          await env.MEDIA.put(id, body, {
+            metadata: { from: user.id, to: rcpt.id },
+            expirationTtl: 30 * 24 * 3600, // ৩০ দিনে নিজে মুছে যাবে
+          })
+        } catch (e) {
+          console.error('kv put', e)
+          return json({ error: 'ফাইল সংরক্ষণ করা যায়নি (KV-র দৈনিক সীমা শেষ বা সেটআপ ভুল হতে পারে)' }, 502)
+        }
         return json({ id })
       }
 
@@ -469,6 +585,7 @@ export default {
       env.DB.prepare('DELETE FROM ws_tickets WHERE expires_at < ?').bind(now),
       env.DB.prepare('DELETE FROM rate_limits WHERE reset_at < ?').bind(now),
       env.DB.prepare('DELETE FROM otps WHERE expires_at < ?').bind(now),
+      env.DB.prepare('DELETE FROM username_holds WHERE until < ?').bind(now),
     ])
   },
 }
