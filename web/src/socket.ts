@@ -2,7 +2,7 @@ import { BASE, call } from './api'
 
 export type Incoming = { k: string; id: string; ts: number; from: string; payload: string }
 export type Conn = {
-  send: (to: string, payload: string) => string | null
+  send: (to: string, payload: string, id?: string, quiet?: boolean) => string | null
   isOpen: () => boolean
   close: () => void
 }
@@ -13,6 +13,7 @@ export function connect(
     onMsg: (m: Incoming) => Promise<boolean>
     onStatus: (ok: boolean) => void
     onError: (e: string) => void
+    onSent?: (id: string) => void
   },
 ): Conn {
   const wsBase = BASE.replace(/^http/, 'ws')
@@ -47,7 +48,8 @@ export function connect(
           if (await h.onMsg(d) && sock.readyState === 1)
             sock.send(JSON.stringify({ type: 'ack', k: d.k }))
         } catch { /* ack নয়: মেসেজ সার্ভারে থাকবে, রিকানেক্টে আবার আসবে */ }
-      } else if (d.type === 'error') h.onError(d.error)
+      } else if (d.type === 'sent') h.onSent?.(d.id)
+      else if (d.type === 'error') h.onError(d.error)
     }
     sock.onclose = () => {
       clearInterval(ping)
@@ -58,10 +60,9 @@ export function connect(
   open()
 
   return {
-    send(to, payload) {
+    send(to, payload, id = crypto.randomUUID(), quiet = false) {
       if (!ws || ws.readyState !== 1) { h.onError('কানেকশন নেই, একটু পরে চেষ্টা করুন'); return null }
-      const id = crypto.randomUUID()
-      ws.send(JSON.stringify({ type: 'send', id, to, payload }))
+      ws.send(JSON.stringify({ type: 'send', id, to, payload, quiet }))
       return id
     },
     isOpen: () => ws?.readyState === 1,

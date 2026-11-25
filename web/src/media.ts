@@ -2,14 +2,17 @@ import type { StoredMsg } from './crypto'
 
 const SAFE_IMG = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 export const isImg = (m: string) => SAFE_IMG.includes(m)
+const SAFE_AUDIO = ['audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/aac', 'audio/wav', 'audio/x-m4a']
+export const isAudio = (m: string) => SAFE_AUDIO.includes(m)
+export const fmtDur = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 // প্রেরকের দাবি করা টাইপে বিশ্বাস নেই: ছবি ছাড়া সব octet-stream
-export const safeType = (m: string) => (isImg(m) ? m : 'application/octet-stream')
+export const safeType = (m: string) => (isImg(m) || isAudio(m) ? m : 'application/octet-stream')
 
 export const fmtSize = (n: number) =>
   n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB'
 
 export const previewText = (m: StoredMsg) =>
-  m.text || (m.file ? (isImg(m.file.m) ? '📷 ছবি' : '📎 ' + m.file.n) : '')
+  m.deleted ? '🚫 মুছে ফেলা মেসেজ' : m.text || (m.file ? (isAudio(m.file.m) ? '🎤 ভয়েস মেসেজ' : isImg(m.file.m) ? '📷 ছবি' : '📎 ' + m.file.n) : '')
 
 export async function makeThumb(file: File): Promise<string | undefined> {
   if (!isImg(file.type)) return
@@ -29,4 +32,20 @@ export async function makeThumb(file: File): Promise<string | undefined> {
   } catch {
     return
   }
+}
+
+// প্রোফাইল ছবি: মাঝখান থেকে চৌকো করে ২৫৬px JPEG (সার্ভারে ছোট ডেটা হিসেবে থাকে)
+export async function resizeAvatar(file: File): Promise<string> {
+  const bmp = await createImageBitmap(file)
+  const size = 256
+  const k = Math.max(size / bmp.width, size / bmp.height)
+  const c = document.createElement('canvas')
+  c.width = c.height = size
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, size, size)
+  const w = bmp.width * k, h = bmp.height * k
+  ctx.drawImage(bmp, (size - w) / 2, (size - h) / 2, w, h)
+  bmp.close()
+  return c.toDataURL('image/jpeg', 0.75)
 }

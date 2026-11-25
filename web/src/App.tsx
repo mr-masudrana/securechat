@@ -1,23 +1,33 @@
 import { useEffect, useState } from 'react'
 import { call } from './api'
-import { loadIdentity } from './crypto'
+import { ensureIdentity } from './crypto'
+import { disablePush } from './push'
 import AuthScreen from './AuthScreen'
+import ProfileSetup from './ProfileSetup'
 import Messenger from './Messenger'
-import type { Session } from './types'
+import type { Me, Session } from './types'
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
+  const [pending, setPending] = useState<{ token: string; me: Me } | null>(null)
   const [boot, setBoot] = useState<'loading' | 'ready' | 'neterr'>('loading')
+
+  const enter = async (token: string, me: Me) => {
+    localStorage.setItem('token', token)
+    if (me.needsProfile) { setPending({ token, me }); return }
+    const identity = await ensureIdentity(me.id, me.username, token)
+    setPending(null)
+    setSession({ id: me.id, username: me.username, fullName: me.fullName, avatar: me.avatar, token, identity })
+  }
+  const safeEnter = (t: string, m: Me) =>
+    enter(t, m).catch(() => alert('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন'))
 
   const start = async () => {
     setBoot('loading')
     const token = localStorage.getItem('token')
     if (token) {
       try {
-        const me = await call('/api/me', 'GET', undefined, token)
-        const identity = await loadIdentity(me.username)
-        if (identity) setSession({ username: me.username, token, identity })
-        else localStorage.removeItem('token') // এই ব্রাউজারে কী নেই, আবার লগইন লাগবে
+        await enter(token, await call('/api/me', 'GET', undefined, token))
       } catch (e: any) {
         if (e.message !== 'Unauthorized') return setBoot('neterr') // নেটওয়ার্ক সমস্যা
         localStorage.removeItem('token')
@@ -28,10 +38,14 @@ export default function App() {
   useEffect(() => { start() }, [])
 
   const logout = async () => {
-    const t = session?.token
+    const t = session?.token ?? pending?.token
     localStorage.removeItem('token')
-    setSession(null)
-    if (t) call('/api/logout', 'POST', undefined, t).catch(() => {})
+    setSession(null); setPending(null)
+    history.replaceState(null, '', location.pathname + location.search) // খোলা চ্যাটের হ্যাশ মুছে ফেলা
+    if (t) {
+      await disablePush(t).catch(() => {}) // এই ডিভাইসে আর নোটিফিকেশন আসবে না
+      call('/api/logout', 'POST', undefined, t).catch(() => {})
+    }
   }
 
   if (boot === 'loading')
@@ -43,7 +57,7 @@ export default function App() {
         <button onClick={start} className="rounded-lg bg-emerald-600 px-5 py-2">আবার চেষ্টা করুন</button>
       </div>
     )
-  return session
-    ? <Messenger session={session} onLogout={logout} />
-    : <AuthScreen onAuth={setSession} />
+  if (session) return <Messenger session={session} onLogout={logout} />
+  if (pending) return <ProfileSetup me={pending.me} token={pending.token} onDone={m => safeEnter(pending.token, m)} onLogout={logout} />
+  return <AuthScreen onAuth={safeEnter} />
 }

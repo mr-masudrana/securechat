@@ -7,12 +7,26 @@ const dec = new TextDecoder()
 
 export const MAX_FILE = 20 * 1024 * 1024
 export type Identity = { privateKey: CryptoKey; publicKeyB64: string }
-export type FileMeta = { id: string; k: string; n: string; m: string; s: number; th?: string }
-export type Body = { t?: string; f?: FileMeta }
+export type FileMeta = { id: string; k: string; n: string; m: string; s: number; th?: string; d?: number }
+export type Quote = { id: string; from: string; t: string }
+export const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
+// c: রিসিপ্ট, q: রিপ্লাই, fw: ফরওয়ার্ড, x: রিঅ্যাকশন, pn: পিন, ed: এডিট, dl: সবার থেকে ডিলিট
+export type Body = {
+  t?: string; f?: FileMeta; c?: { k: 'd' | 'r'; ids: string[] }
+  q?: Quote; fw?: 1
+  x?: { id: string; from: string; e: string }
+  pn?: { id: string; from: string; on: boolean }
+  ed?: { id: string; t: string }
+  dl?: { id: string }
+}
 export type StoredMsg = {
   mid: string; owner: string; peer: string
   mine: boolean; text: string; ts: number; failed?: boolean
   file?: FileMeta; blob?: Blob; gone?: boolean
+  status?: 'sending' | 'failed' | 'sent' | 'delivered' | 'read' // নিজের পাঠানো মেসেজ
+  rd?: boolean // আসা মেসেজের জন্য 'পড়েছি' রিসিপ্ট পাঠানো হয়েছে
+  q?: Quote; fw?: boolean; edited?: boolean; deleted?: boolean
+  pinned?: number; reactions?: Record<string, string> // রিঅ্যাকশন: ইউজারনেম(ছোট হাতের) → ইমোজি
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -70,7 +84,7 @@ export async function fingerprint(pubB64: string) {
 
 export async function lookupUser(peer: string, token: string) {
   return (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
-    { username: string; publicKey: string | null }
+    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null }
 }
 
 // দুজনের কী থেকে একই নাম্বার তৈরি হয়, দুই পাশে মিললে মাঝখানে কেউ কী বদলায়নি
@@ -125,7 +139,8 @@ function cleanFile(f: any): FileMeta | undefined {
   const s = Number.isFinite(f.s) && f.s >= 0 && f.s <= MAX_FILE ? f.s : 0
   const th = typeof f.th === 'string' && f.th.startsWith('data:image/jpeg;base64,') && f.th.length < 60_000
     ? f.th : undefined
-  return { id: f.id, k: f.k, n, m, s, th }
+  const d = Number.isFinite(f.d) && f.d > 0 && f.d <= 3600 ? Math.round(f.d) : undefined
+  return { id: f.id, k: f.k, n, m, s, th, d }
 }
 
 // নেটওয়ার্ক সমস্যায় throw করে। ডিক্রিপ্ট ব্যর্থ হলে null দেয়।
@@ -140,7 +155,23 @@ export async function decryptBody(id: Identity, me: string, from: string, token:
     if (typeof o.t === 'string') body.t = o.t.slice(0, 5000)
     const f = cleanFile(o.f)
     if (f) body.f = f
-    return body.t === undefined && !body.f ? null : body
+    const c = o.c
+    if (c && (c.k === 'd' || c.k === 'r') && Array.isArray(c.ids))
+      body.c = { k: c.k, ids: c.ids.filter((x: any) => typeof x === 'string' && x.length <= 64).slice(0, 50) }
+    // আসা সব ডেটা অবিশ্বস্ত: কঠোরভাবে যাচাই
+    const idOk = (v: any) => typeof v === 'string' && v.length > 0 && v.length <= 64 && !v.includes('|')
+    const nameOk = (v: any) => typeof v === 'string' && /^[a-zA-Z0-9_]{3,20}$/.test(v)
+    if (o.x && idOk(o.x.id) && nameOk(o.x.from) && typeof o.x.e === 'string' && (o.x.e === '' || REACTIONS.includes(o.x.e)))
+      body.x = { id: o.x.id, from: o.x.from, e: o.x.e }
+    if (o.pn && idOk(o.pn.id) && nameOk(o.pn.from) && typeof o.pn.on === 'boolean')
+      body.pn = { id: o.pn.id, from: o.pn.from, on: o.pn.on }
+    if (o.ed && idOk(o.ed.id) && typeof o.ed.t === 'string' && o.ed.t.length > 0)
+      body.ed = { id: o.ed.id, t: o.ed.t.slice(0, 5000) }
+    if (o.dl && idOk(o.dl.id)) body.dl = { id: o.dl.id }
+    if (o.q && idOk(o.q.id) && nameOk(o.q.from) && typeof o.q.t === 'string')
+      body.q = { id: o.q.id, from: o.q.from, t: o.q.t.slice(0, 200) }
+    if (o.fw === 1) body.fw = 1
+    return body.t === undefined && !body.f && !body.c && !body.x && !body.pn && !body.ed && !body.dl ? null : body
   } catch {
     return null
   }
@@ -164,6 +195,25 @@ export async function decryptFile(data: ArrayBuffer, k: string) {
 
 // ---------- লোকাল মেসেজ ----------
 export const saveMessage = (m: StoredMsg) => idb(MSGS, 'readwrite', s => s.put(m))
+// একই ট্রানজাকশনে পড়া+লেখা (ডাউনলোড করা ফাইল হারাবে না); স্ট্যাটাস শুধু উপরের দিকে যায়
+const RANK: Record<string, number> = { sending: 0, failed: 1, sent: 2, delivered: 3, read: 4 }
+export async function patchMessage(mid: string, patch: Partial<StoredMsg>) {
+  const db = await openDB()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(MSGS, 'readwrite')
+    const s = tx.objectStore(MSGS)
+    const g = s.get(mid)
+    g.onsuccess = () => {
+      const cur = g.result as StoredMsg | undefined
+      if (!cur) return
+      const p = { ...patch }
+      if (p.status && RANK[p.status] <= RANK[cur.status ?? 'sent']) delete p.status
+      s.put({ ...cur, ...p })
+    }
+    tx.oncomplete = () => res()
+    tx.onerror = tx.onabort = () => rej(tx.error)
+  })
+}
 export const getMessage = (mid: string) => idb<StoredMsg | undefined>(MSGS, 'readonly', s => s.get(mid))
 
 export async function loadMessages(owner: string) {
@@ -171,3 +221,34 @@ export async function loadMessages(owner: string) {
     s => s.index('owner').getAll(owner.toLowerCase()))
   return all.sort((a, b) => a.ts - b.ts)
 }
+
+// আইডেন্টিটি এখন ইউজার id দিয়ে রাখা হয়। আগের (username দিয়ে রাখা) কী থাকলে সেটাই নেওয়া হয়
+export async function ensureIdentity(id: string, username: string, token: string) {
+  let ident = (await loadIdentity(id)) ?? (username ? await loadIdentity(username) : undefined)
+  if (!ident) {
+    ident = await generateIdentity()
+    await call('/api/key', 'PUT', { publicKey: ident.publicKeyB64 }, token)
+  }
+  await saveIdentity(id, ident)
+  return ident
+}
+
+// একই ট্রানজাকশনে পড়ে-বদলে-লেখা (রিঅ্যাকশন, এডিট ইত্যাদি একসঙ্গে এলেও কিছু হারায় না)
+export async function mutateMessage(mid: string, fn: (m: StoredMsg) => StoredMsg): Promise<StoredMsg | undefined> {
+  const db = await openDB()
+  return new Promise((res, rej) => {
+    const tx = db.transaction(MSGS, 'readwrite')
+    const s = tx.objectStore(MSGS)
+    let out: StoredMsg | undefined
+    const g = s.get(mid)
+    g.onsuccess = () => {
+      const cur = g.result as StoredMsg | undefined
+      if (!cur) return
+      out = fn(cur)
+      s.put(out)
+    }
+    tx.oncomplete = () => res(out)
+    tx.onerror = tx.onabort = () => rej(tx.error)
+  })
+}
+export const deleteMessage = (mid: string) => idb(MSGS, 'readwrite', s => s.delete(mid))

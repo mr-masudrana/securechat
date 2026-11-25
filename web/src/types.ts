@@ -1,2 +1,9 @@
 import type { Identity } from './crypto'
-export type Session = { username: string; token: string; identity: Identity }
+export type Me = {
+  id: string; username: string; fullName: string
+  email: string | null; avatar: string | null; needsProfile: boolean
+}
+export type Session = {
+  id: string; username: string; fullName: string; avatar: string | null
+  token: string; identity: Identity
+}
