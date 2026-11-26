@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { call } from './api'
 import { ensureIdentity } from './crypto'
 import { disablePush } from './push'
+import { t } from './i18n'
 import AuthScreen from './AuthScreen'
 import ProfileSetup from './ProfileSetup'
 import Messenger from './Messenger'
@@ -17,10 +18,11 @@ export default function App() {
     if (me.needsProfile) { setPending({ token, me }); return }
     const identity = await ensureIdentity(me.id, me.username, token)
     setPending(null)
-    setSession({ id: me.id, username: me.username, fullName: me.fullName, email: me.email, avatar: me.avatar, token, identity })
+    setSession({ id: me.id, username: me.username, fullName: me.fullName, email: me.email, avatar: me.avatar,
+      bio: me.bio, gender: me.gender, birthDate: me.birthDate, token, identity })
   }
-  const safeEnter = (t: string, m: Me) =>
-    enter(t, m).catch(() => alert('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন'))
+  const safeEnter = (tok: string, m: Me) =>
+    enter(tok, m).catch(() => alert(t('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন')))
 
   const start = async () => {
     setBoot('loading')
@@ -38,13 +40,13 @@ export default function App() {
   useEffect(() => { start() }, [])
 
   const logout = async () => {
-    const t = session?.token ?? pending?.token
+    const tok = session?.token ?? pending?.token
     localStorage.removeItem('token')
     setSession(null); setPending(null)
     history.replaceState(null, '', location.pathname + location.search) // খোলা চ্যাটের হ্যাশ মুছে ফেলা
-    if (t) {
-      await disablePush(t).catch(() => {}) // এই ডিভাইসে আর নোটিফিকেশন আসবে না
-      call('/api/logout', 'POST', undefined, t).catch(() => {})
+    if (tok) {
+      await disablePush(tok).catch(() => {}) // এই ডিভাইসে আর নোটিফিকেশন আসবে না
+      call('/api/logout', 'POST', undefined, tok).catch(() => {})
     }
   }
 

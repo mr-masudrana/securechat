@@ -8,7 +8,10 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT,
   full_name TEXT,
   avatar TEXT,
-  profile_done INTEGER NOT NULL DEFAULT 1
+  profile_done INTEGER NOT NULL DEFAULT 1,
+  bio TEXT,
+  gender TEXT,
+  birth_date TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE TABLE IF NOT EXISTS sessions (

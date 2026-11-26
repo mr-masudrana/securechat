@@ -1,1 +1,26 @@
 @import "tailwindcss";
+
+:root { color-scheme: dark; }
+
+/* লাইট থিম: নিউট্রাল রঙ উল্টে দেওয়া; text-white তখন গাঢ় লেখা হয়ে যায় */
+:root.light {
+  color-scheme: light;
+  --color-slate-900: #f1f5f9;
+  --color-slate-800: #ffffff;
+  --color-slate-700: #e2e8f0;
+  --color-slate-600: #cbd5e1;
+  --color-slate-500: #94a3b8;
+  --color-slate-400: #64748b;
+  --color-slate-300: #475569;
+  --color-white: #0f172a;
+  --color-emerald-400: #059669;
+  --color-red-400: #dc2626;
+  --color-amber-400: #b45309;
+}
+/* রঙিন ব্যাকগ্রাউন্ডের (বাবল, বাটন) ভেতরে লেখা আগের মতো সাদাই থাকে */
+:root.light .bg-emerald-600, :root.light .bg-emerald-700,
+:root.light .bg-red-600, :root.light .bg-red-700, :root.light .bg-red-900 {
+  --color-white: #ffffff;
+  --color-emerald-400: #34d399;
+  color: #ffffff;
+}

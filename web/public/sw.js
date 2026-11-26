@@ -2,7 +2,7 @@
 const CACHE = 'securechat-v2'
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', e => e.waitUntil((async () => {
-  for (const k of await caches.keys()) if (k !== CACHE) await caches.delete(k)
+  for (const k of await caches.keys()) if (k !== CACHE && k !== 'prefs') await caches.delete(k)
   await self.clients.claim()
 })()))
 self.addEventListener('fetch', e => {
@@ -23,11 +23,21 @@ self.addEventListener('fetch', e => {
 self.addEventListener('push', e => {
   e.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-    if (wins.some(w => w.visibilityState === 'visible')) return
+    const visible = wins.some(w => w.visibilityState === 'visible')
+    // iOS/Safari প্রতি পুশে নোটিফিকেশন দেখাতে বাধ্য করে, নইলে সাবস্ক্রিপশন বাতিল হতে পারে;
+    // তাই অ্যাপ খোলা থাকলেও দেখিয়ে সঙ্গে সঙ্গে বন্ধ করি। অন্য ব্রাউজারে খোলা থাকলে কিছু দেখাই না।
+    const ios = /iPhone|iPad|iPod/.test(self.navigator.userAgent)
+    if (visible && !ios) return
+    const lr = await (await caches.open('prefs')).match('/__lang')
+    const en = lr && (await lr.text()) === 'en'
     await self.registration.showNotification('SecureChat', {
-      body: 'নতুন মেসেজ এসেছে', tag: 'new-message', renotify: true,
-      icon: '/icon-192.png', badge: '/icon-192.png',
+      body: en ? 'New message' : 'নতুন মেসেজ এসেছে', tag: 'new-message', renotify: true,
+      icon: '/icon-192.png', badge: '/icon-192.png', silent: visible,
     })
+    if (visible) {
+      await new Promise(r => setTimeout(r, 400))
+      for (const n of await self.registration.getNotifications({ tag: 'new-message' })) n.close()
+    }
   })())
 })
 self.addEventListener('notificationclick', e => {

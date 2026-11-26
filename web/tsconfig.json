@@ -5,6 +5,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
+    "jsxImportSource": "i18n-jsx",
+    "paths": { "i18n-jsx/*": ["./src/i18n-jsx/*"] },
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,

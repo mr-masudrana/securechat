@@ -35,7 +35,7 @@ export default function ProfileSetup({ me, token, onDone, onLogout }: {
     <div className="min-h-dvh grid place-items-center bg-slate-900 text-white p-4">
       <div className="w-full max-w-sm space-y-4 text-center">
         <h1 className="text-2xl font-bold">প্রোফাইল সম্পূর্ণ করুন</h1>
-        <p className="text-slate-400 text-sm">স্বাগতম, {me.fullName}! একটা username বেছে নিন (পরে বদলানো যাবে না)।</p>
+        <p className="text-slate-400 text-sm">স্বাগতম, {me.fullName}! একটা username বেছে নিন (পরে মাসে একবার বদলানো যাবে)।</p>
         <button onClick={() => fileRef.current?.click()}
           className="mx-auto size-28 rounded-full bg-slate-800 grid place-items-center overflow-hidden text-4xl">
           {avatar ? <img src={avatar} alt="" className="size-full object-cover" /> : <Icon name="camera" className="size-10 text-slate-400" />}

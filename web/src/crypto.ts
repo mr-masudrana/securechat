@@ -30,8 +30,10 @@ export type StoredMsg = {
   pinned?: number; reactions?: Record<string, string> // রিঅ্যাকশন: ইউজারনেম(ছোট হাতের) → ইমোজি
 }
 
+let dbPromise: Promise<IDBDatabase> | null = null
+// একটাই কানেকশন ক্যাশ করা হয় (প্রতি অপারেশনে নতুন কানেকশন খুলে ফেলে রাখা হতো)
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((res, rej) => {
+  return (dbPromise ??= new Promise<IDBDatabase>((res, rej) => {
     const r = indexedDB.open('securechat', 2)
     r.onupgradeneeded = () => {
       const db = r.result
@@ -40,9 +42,14 @@ function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(MSGS, { keyPath: 'mid' }).createIndex('owner', 'owner')
       }
     }
-    r.onsuccess = () => res(r.result)
-    r.onerror = () => rej(r.error)
-  })
+    r.onsuccess = () => {
+      const db = r.result
+      db.onversionchange = () => { db.close(); dbPromise = null }
+      db.onclose = () => { dbPromise = null }
+      res(db)
+    }
+    r.onerror = () => { dbPromise = null; rej(r.error) }
+  }))
 }
 
 async function idb<T>(store: string, mode: IDBTransactionMode,
@@ -87,8 +94,21 @@ export async function lookupUser(peer: string, token: string) {
   const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
     { username: string; publicKey: string | null; fullName?: string; avatar?: string | null }
   // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
-  if (u.publicKey) localStorage.setItem('pk:' + u.username.toLowerCase(), u.publicKey)
+  if (u.publicKey) {
+    const n = u.username.toLowerCase()
+    localStorage.setItem('pk:' + n, u.publicKey)
+    // প্রথমবার দেখা কী "পিন" করা হয়; পরে বদলালে সতর্কতা (ভেরিফাই না করা কন্টাক্টের জন্যও)
+    if (!localStorage.getItem('pin:' + n)) localStorage.setItem('pin:' + n, u.publicKey)
+  }
   return u
+}
+export const pinChanged = (peer: string) => {
+  const n = peer.toLowerCase(), pin = localStorage.getItem('pin:' + n), cur = localStorage.getItem('pk:' + n)
+  return !!pin && !!cur && pin !== cur
+}
+export const acceptKey = (peer: string) => {
+  const n = peer.toLowerCase(), cur = localStorage.getItem('pk:' + n)
+  if (cur) localStorage.setItem('pin:' + n, cur)
 }
 
 // দুজনের কী থেকে একই নাম্বার তৈরি হয়, দুই পাশে মিললে মাঝখানে কেউ কী বদলায়নি
@@ -343,6 +363,7 @@ export async function renamePeer(owner: string, oldPeer: string, newPeer: string
     if (u.mid !== m.mid) cur.delete()
     s.put(u)
   }, ow)
+  moveKeys(`pin:${o}`, `pin:${n}`, false)
   moveKeys(`read:${ow}:${o}`, `read:${ow}:${n}`, false)
   moveKeys(`verified:${ow}:${o}`, `verified:${ow}:${n}`, false)
 }

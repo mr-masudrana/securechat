@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type C
 import { connect, type Conn } from './socket'
 import { call, downloadBlob, uploadBlob } from './api'
 import {
-  decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
+  acceptKey, pinChanged, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
   MAX_FILE, patchMessage, safetyNumber, saveMessage, type Body, type FileMeta, type Quote, type StoredMsg,
 } from './crypto'
 import { fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType } from './media'
@@ -10,8 +10,8 @@ import { useProfile } from './profiles'
 import Icon, { type IconName } from './Icon'
 import { beep, readReceiptsOn, soundOn } from './notify'
 import { syncPush } from './push'
-import NotifDialog from './NotifDialog'
-import { AccountDialog, PrivacyDialog } from './MenuDialogs'
+import { AccountPage, PrivacyPage, SettingsPage } from './Pages'
+import { locale, t } from './i18n'
 import type { Session } from './types'
 
 const AUTO_MAX = 10 * 1024 * 1024
@@ -46,8 +46,8 @@ function dayLabel(ts: number) {
   const diff = Math.round((start(new Date()) - start(d)) / 86400000)
   if (diff === 0) return 'আজ'
   if (diff === 1) return 'গতকাল'
-  if (diff > 1 && diff < 7) return d.toLocaleDateString('bn-BD', { weekday: 'long' })
-  return d.toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })
+  if (diff > 1 && diff < 7) return d.toLocaleDateString(locale, { weekday: 'long' })
+  return d.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' })
 }
 const DayChip = ({ ts }: { ts: number }) => (
   <div className="flex justify-center py-2">
@@ -57,7 +57,7 @@ const DayChip = ({ ts }: { ts: number }) => (
 // চ্যাট লিস্টে: আজ হলে সময়, গতকাল হলে "গতকাল", নইলে তারিখ
 const listTime = (ts: number) => {
   const l = dayLabel(ts)
-  return l === 'আজ' ? hhmm(ts) : l === 'গতকাল' ? l : new Date(ts).toLocaleDateString('bn-BD', { day: 'numeric', month: 'short' })
+  return l === 'আজ' ? hhmm(ts) : l === 'গতকাল' ? l : new Date(ts).toLocaleDateString(locale, { day: 'numeric', month: 'short' })
 }
 const Avatar = ({ name, src }: { name: string; src?: string | null }) => src
   ? <img src={src} alt="" className="size-11 shrink-0 rounded-full object-cover" />
@@ -81,6 +81,12 @@ const Tick = ({ s }: { s?: Status }) => (
   </span>
 )
 
+type PageName = 'account' | 'privacy' | 'settings'
+const pageFromHash = (): PageName | null => {
+  const m = location.hash.match(/^#p\/(account|privacy|settings)$/)
+  return m ? (m[1] as PageName) : null
+}
+
 // খোলা চ্যাট URL-এর হ্যাশে থাকে (#c/username): রিফ্রেশে ফিরে আসে, ব্যাক বাটনে লিস্টে যায়
 const fromHash = () => {
   const m = location.hash.match(/^#c\/(.+)$/)
@@ -101,10 +107,13 @@ export default function Messenger({ session, onLogout, onSession }: {
   const [newName, setNewName] = useState('')
   const [dl, setDl] = useState<DlState>({})
   const [myAvatar, setMyAvatar] = useState(session.avatar)
-  const [showNotif, setShowNotif] = useState(false)
+  const [page, setPage] = useState<PageName | null>(pageFromHash)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [showAccount, setShowAccount] = useState(false)
-  const [showPrivacy, setShowPrivacy] = useState(false)
+  const openPage = (p: PageName) => { history.pushState({ page: p }, '', '#p/' + p); setPage(p) }
+  const closePage = () => {
+    if (history.state?.page) history.back() // popstate এসে page খালি করবে
+    else { setPage(null); history.replaceState(null, '', location.pathname + location.search) }
+  }
   const [loaded, setLoaded] = useState(false)
   const changeUsername = async (name: string, current: string) => {
     const r = await call('/api/account/username', 'POST', { username: name, current }, token)
@@ -134,10 +143,8 @@ export default function Messenger({ session, onLogout, onSession }: {
   }
   const goMenu = (k: 'account' | 'privacy' | 'settings' | 'logout') => {
     setMenuOpen(false)
-    if (k === 'account') setShowAccount(true)
-    else if (k === 'privacy') setShowPrivacy(true)
-    else if (k === 'settings') setShowNotif(true)
-    else onLogout()
+    if (k === 'logout') onLogout()
+    else openPage(k)
   }
   const changeAvatar = async (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -303,12 +310,12 @@ export default function Messenger({ session, onLogout, onSession }: {
 
   // ব্যাক বাটন/সোয়াইপ: চ্যাট থেকে লিস্টে ফেরা (অ্যাপ থেকে বের হয় না)
   useEffect(() => {
-    const c = fromHash()
-    if (c && !history.state?.chat) { // সরাসরি লিংকে খুললে নিচে লিস্টের একটা এন্ট্রি বসাই
+    const c = fromHash(), p = pageFromHash(), h = location.hash
+    if ((c || p) && !history.state?.chat && !history.state?.page) { // সরাসরি লিংকে খুললে নিচে লিস্টের একটা এন্ট্রি বসাই
       history.replaceState(null, '', location.pathname + location.search)
-      history.pushState({ chat: c }, '', '#c/' + encodeURIComponent(c))
+      history.pushState(c ? { chat: c } : { page: p }, '', h)
     }
-    const onPop = () => setActive(fromHash())
+    const onPop = () => { setActive(fromHash()); setPage(pageFromHash()) }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -534,7 +541,7 @@ export default function Messenger({ session, onLogout, onSession }: {
       {/* ---- চ্যাট লিস্ট ---- */}
       <aside className={`${active ? 'hidden md:flex' : 'flex'} relative w-full md:w-80 flex-col border-r border-slate-800`}>
         <header className="flex items-center gap-2 p-3 border-b border-slate-800">
-          <button onClick={() => setShowAccount(true)} title="অ্যাকাউন্ট"><Avatar name={username} src={myAvatar} /></button>
+          <button onClick={() => openPage('account')} title="অ্যাকাউন্ট"><Avatar name={username} src={myAvatar} /></button>
           <div className="flex-1 min-w-0">
             <p className="font-bold flex items-center gap-1"><Icon name="lock" className="size-4 text-emerald-400" /> SecureChat</p>
             <p className="text-xs text-slate-400">
@@ -563,7 +570,7 @@ export default function Messenger({ session, onLogout, onSession }: {
         )}
         <div className="flex-1 overflow-y-auto pb-24">
           {convos.length === 0 && (
-            <p className="p-6 text-center text-slate-400 text-sm">কোনো চ্যাট নেই। উপরের + চেপে নতুন চ্যাট শুরু করুন।</p>
+            <p className="p-6 text-center text-slate-400 text-sm">কোনো চ্যাট নেই। নিচের + বাটন চেপে নতুন চ্যাট শুরু করুন।</p>
           )}
           {convos.map(c => (
             <button key={c.peer} onClick={() => openChat(c.peer)}
@@ -617,12 +624,14 @@ export default function Messenger({ session, onLogout, onSession }: {
           </div>
         </div>
       )}
-      {showNotif && <NotifDialog token={token} onClose={() => setShowNotif(false)} />}
-      {showAccount && (
-        <AccountDialog session={session} avatar={myAvatar} onAvatar={changeAvatar} onClose={() => setShowAccount(false)}
-          onName={f => onSession({ fullName: f })} onEmail={e => onSession({ email: e })} onUsername={changeUsername} />
+      {page === 'account' && (
+        <AccountPage session={session} avatar={myAvatar} onAvatar={changeAvatar} onPatch={onSession}
+          onUsername={changeUsername} onBack={closePage} />
       )}
-      {showPrivacy && <PrivacyDialog identity={identity} onClearAll={clearAll} onClose={() => setShowPrivacy(false)} />}
+      {page === 'privacy' && (
+        <PrivacyPage session={session} identity={identity} onPatch={onSession} onClearAll={clearAll} onBack={closePage} />
+      )}
+      {page === 'settings' && <SettingsPage token={token} onBack={closePage} />}
       {toast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 px-4 py-2 rounded-lg text-sm">{toast}</div>
       )}
@@ -761,7 +770,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const startRec = async () => {
     if (sending) return
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
-      return alert('এই ব্রাউজারে ভয়েস রেকর্ড করা যাচ্ছে না')
+      return alert(t('এই ব্রাউজারে ভয়েস রেকর্ড করা যাচ্ছে না'))
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported(t))
@@ -787,7 +796,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       setSecs(0)
       setRec(true)
     } catch {
-      alert('মাইক্রোফোনের অনুমতি দিন')
+      alert(t('মাইক্রোফোনের অনুমতি দিন'))
     }
   }
   useEffect(() => {
@@ -852,7 +861,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     lookupUser(peer, session.token).then(u => {
       const v = localStorage.getItem(vk)
       setVerified(!!v && v === u.publicKey)
-      setKeyChanged(!!v && !!u.publicKey && v !== u.publicKey)
+      setKeyChanged((!!v && !!u.publicKey && v !== u.publicKey) || pinChanged(peer))
     }).catch(() => {})
   }, [])
 
@@ -890,6 +899,9 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       {keyChanged && (
         <div className="bg-red-900 text-sm p-3">
           <Icon name="alert" className="size-4 inline -mt-0.5" /> @{peer}-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। "নিরাপত্তা" থেকে সেফটি নাম্বার মিলিয়ে নিন।
+          <button className="block mt-2 underline" onClick={() => {
+            acceptKey(peer); localStorage.removeItem(vk); setVerified(false); setKeyChanged(false)
+          }}>বুঝেছি, নতুন কী মেনে নিলাম</button>
         </div>
       )}
 
@@ -1022,7 +1034,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       {safety && (
         <SafetyDialog peer={peer} session={session} vk={vk} onClose={ok => {
           setSafety(false)
-          if (ok) { setVerified(true); setKeyChanged(false) }
+          if (ok) { acceptKey(peer); setVerified(true); setKeyChanged(false) }
         }} />
       )}
     </>

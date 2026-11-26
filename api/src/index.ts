@@ -12,6 +12,8 @@ export interface Env {
   DEV_MODE?: string // '1' হলে মেইল না পাঠিয়ে OTP লগে ছাপে (শুধু লোকাল টেস্ট)
 }
 
+const MAX_PENDING = 500 // প্রতি ইনবক্সে মোট অপেক্ষমাণ মেসেজ
+const MAX_PER_SENDER = 150 // এক প্রেরক সর্বোচ্চ এতগুলো জমা রাখতে পারে
 const MAX_UPLOAD = 20 * 1024 * 1024 + 1024 // ২০ MB ফাইল + IV/ট্যাগ (KV-র সীমা ২৫ MiB)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const enc = new TextEncoder()
@@ -39,6 +41,15 @@ async function hashPw(pw: string, salt: Uint8Array) {
     { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256)
   return b64(bits)
 }
+
+// সময় দেখে অনুমান ঠেকাতে ধ্রুবক-সময়ের তুলনা
+function safeEq(a: string, b: string) {
+  const x = enc.encode(a), y = enc.encode(b)
+  let d = x.length ^ y.length
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0)
+  return d === 0
+}
+const DUMMY_SALT = new Uint8Array(16)
 
 async function newSession(env: Env, userId: string) {
   const token = b64(crypto.getRandomValues(new Uint8Array(32)))
@@ -77,6 +88,7 @@ const validEmail = (e: string) => e.length <= 254 && EMAIL_RE.test(e)
 const meOf = (u: any) => ({
   id: u.id, username: u.profile_done ? u.username : '', fullName: u.full_name || u.username,
   email: u.email ?? null, avatar: u.avatar ?? null, needsProfile: !u.profile_done,
+  bio: u.bio ?? '', gender: u.gender ?? '', birthDate: u.birth_date ?? '',
 })
 
 // Brevo (ফ্রি, কার্ড লাগে না) দিয়ে ইমেইল পাঠানো
@@ -119,15 +131,19 @@ async function issueOtp(env: Env, email: string, purpose: Purpose,
 
 async function checkOtp(env: Env, email: string, purpose: Purpose, code: unknown):
   Promise<{ ok: true; row: any } | { ok: false; error: string }> {
-  const row = await env.DB.prepare('SELECT * FROM otps WHERE email = ? AND purpose = ?')
-    .bind(email, purpose).first<any>()
-  if (!row || row.expires_at < Date.now()) return { ok: false, error: 'কোডের মেয়াদ শেষ, নতুন কোড নিন' }
-  if (row.attempts >= 5) return { ok: false, error: 'অনেকবার ভুল হয়েছে, নতুন কোড নিন' }
-  if ((await sha256(String(code ?? '').trim() + ':' + email)) !== row.code_hash) {
-    await env.DB.prepare('UPDATE otps SET attempts = attempts + 1 WHERE email = ? AND purpose = ?')
-      .bind(email, purpose).run()
-    return { ok: false, error: 'কোড ঠিক নেই' }
+  // চেষ্টার সংখ্যা তুলনার আগেই atomic ভাবে বাড়ে, তাই সমান্তরাল রিকোয়েস্টে ৫ বারের সীমা এড়ানো যায় না
+  const row = await env.DB.prepare(
+    `UPDATE otps SET attempts = attempts + 1
+     WHERE email = ? AND purpose = ? AND attempts < 5 AND expires_at >= ? RETURNING *`)
+    .bind(email, purpose, Date.now()).first<any>()
+  if (!row) {
+    const ex = await env.DB.prepare('SELECT attempts, expires_at FROM otps WHERE email = ? AND purpose = ?')
+      .bind(email, purpose).first<{ attempts: number; expires_at: number }>()
+    if (ex && ex.expires_at >= Date.now() && ex.attempts >= 5) return { ok: false, error: 'অনেকবার ভুল হয়েছে, নতুন কোড নিন' }
+    return { ok: false, error: 'কোডের মেয়াদ শেষ, নতুন কোড নিন' }
   }
+  if (!safeEq(await sha256(String(code ?? '').trim() + ':' + email), row.code_hash))
+    return { ok: false, error: 'কোড ঠিক নেই' }
   return { ok: true, row }
 }
 
@@ -250,15 +266,19 @@ export default {
         const b = await readJson(req)
         const ident = String(b.identifier ?? b.username ?? '').trim()
         const password = String(b.password ?? '')
+        // অন্যের অ্যাকাউন্ট লক করে দেওয়া ঠেকাতে প্রধান সীমা ident+IP জোড়ায়; অ্যাকাউন্ট-ভিত্তিক সীমা অনেক বড়
         if (await limited(env, `login-ip:${ip}`, 30, 300) ||
-            await limited(env, `login-user:${ident.toLowerCase()}`, 10, 900))
+            await limited(env, `login-user:${ident.toLowerCase()}:${ip}`, 10, 900) ||
+            await limited(env, `login-acct:${ident.toLowerCase()}`, 100, 3600))
           return json(tooMany, 429)
         const byEmail = ident.includes('@')
         const u = await env.DB.prepare(byEmail
           ? 'SELECT * FROM users WHERE email = ?'
           : 'SELECT * FROM users WHERE username = ? AND profile_done = 1')
           .bind(byEmail ? ident.toLowerCase() : ident).first<any>()
-        const ok = u && (await hashPw(password, unb64(u.salt))) === u.pass_hash
+        // ইউজার না থাকলেও হ্যাশ চালাই, যাতে সময় দেখে বোঝা না যায় অ্যাকাউন্ট আছে কিনা
+        const calc = await hashPw(password, u ? unb64(u.salt) : DUMMY_SALT)
+        const ok = u && safeEq(calc, u.pass_hash)
         if (!ok) return json({ error: 'ইমেইল/username বা password ভুল' }, 401)
         return json({ token: await newSession(env, u.id), me: meOf(u) })
       }
@@ -342,9 +362,10 @@ export default {
       if (pathname === '/api/profile' && req.method === 'POST') {
         const user = await authUser(req, env)
         if (!user) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `prof:${user.id}`, 30, 3600)) return json(tooMany, 429)
         const { username, avatar } = await readJson(req)
         const hasAvatar = typeof avatar === 'string'
-        if (hasAvatar && (!avatar.startsWith('data:image/jpeg;base64,') || avatar.length > 80_000))
+        if (hasAvatar && (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(avatar) || avatar.length > 80_000))
           return json({ error: 'ছবি ঠিক নেই' }, 400)
         if (!user.profile_done) {
           if (!/^[a-zA-Z0-9_]{3,20}$/.test(username || ''))
@@ -377,8 +398,11 @@ export default {
       }
 
       if (pathname.startsWith('/api/users/') && req.method === 'GET') {
-        if (!(await authUser(req, env))) return json({ error: 'Unauthorized' }, 401)
-        const name = decodeURIComponent(pathname.slice('/api/users/'.length))
+        const me = await authUser(req, env)
+        if (!me) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `lookup:${me.id}`, 120, 60)) return json(tooMany, 429)
+        let name: string
+        try { name = decodeURIComponent(pathname.slice('/api/users/'.length)) } catch { return json({ error: 'Not found' }, 404) }
         const u = await env.DB.prepare(
           'SELECT username, full_name, avatar, public_key FROM users WHERE username = ? AND profile_done = 1')
           .bind(name).first<any>()
@@ -397,7 +421,7 @@ export default {
         const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<any>()
         const needPw = async (): Promise<Response | null> => {
           if (await limited(env, `pwtry:${user.id}`, 10, 900)) return json(tooMany, 429)
-          return (await hashPw(String(b.current ?? ''), unb64(row.salt))) === row.pass_hash
+          return safeEq(await hashPw(String(b.current ?? ''), unb64(row.salt)), row.pass_hash)
             ? null : json({ error: 'বর্তমান পাসওয়ার্ড ভুল' }, 403)
         }
 
@@ -406,6 +430,26 @@ export default {
           if (fullName.length < 2 || fullName.length > 60) return json({ error: 'পুরো নাম ২-৬০ অক্ষরের হতে হবে' }, 400)
           await env.DB.prepare('UPDATE users SET full_name = ? WHERE id = ?').bind(fullName, user.id).run()
           return json({ ok: true, fullName })
+        }
+
+        if (what === 'profile') {
+          const fullName = String(b.fullName ?? '').trim().replace(/\s+/g, ' ')
+          const bio = String(b.bio ?? '').trim()
+          const gender = String(b.gender ?? '')
+          const birth = String(b.birthDate ?? '')
+          if (fullName.length < 2 || fullName.length > 60) return json({ error: 'পুরো নাম ২-৬০ অক্ষরের হতে হবে' }, 400)
+          if (bio.length > 150) return json({ error: 'Bio সর্বোচ্চ ১৫০ অক্ষরের হতে পারে' }, 400)
+          if (!['', 'male', 'female', 'other'].includes(gender)) return json({ error: 'লিঙ্গ ঠিক নেই' }, 400)
+          if (birth) {
+            const ts = Date.parse(birth + 'T00:00:00Z')
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(birth) || isNaN(ts) || new Date(ts).toISOString().slice(0, 10) !== birth ||
+                ts > Date.now() || ts < Date.parse('1900-01-01T00:00:00Z'))
+              return json({ error: 'জন্ম তারিখ ঠিক নেই' }, 400)
+          }
+          await env.DB.prepare('UPDATE users SET full_name = ?, bio = ?, gender = ?, birth_date = ? WHERE id = ?')
+            .bind(fullName, bio, gender, birth, user.id).run()
+          const u = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<any>()
+          return json(meOf(u))
         }
 
         if (what === 'password') {
@@ -564,7 +608,10 @@ export default {
           })
         }
         if (req.method === 'DELETE') {
-          await env.MEDIA.delete(mm[1]) // আইডি শুধু প্রেরক ও প্রাপকের জানা (UUID)
+          // শুধু প্রেরক বা প্রাপক মুছতে পারে
+          const { metadata } = await env.MEDIA.getWithMetadata<{ from: string; to: string }>(mm[1])
+          if (metadata && !allowedMeta(metadata)) return json({ error: 'ফাইল পাওয়া যায়নি' }, 404)
+          if (metadata) await env.MEDIA.delete(mm[1])
           return json({ ok: true })
         }
       }
@@ -599,17 +646,36 @@ export class Inbox extends DurableObject<Env> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
   }
 
+  // অপেক্ষমাণ মেসেজের মোট ও প্রেরক-ভিত্তিক সংখ্যা (প্রথমবার থাকা মেসেজ গুনে নেয়)
+  private async getMeta(): Promise<{ n: number; by: Record<string, number> }> {
+    const cur = await this.ctx.storage.get<{ n: number; by: Record<string, number> }>('meta')
+    if (cur) return cur
+    const meta = { n: 0, by: {} as Record<string, number> }
+    const all = await this.ctx.storage.list<any>({ prefix: 'msg:' })
+    for (const v of all.values()) {
+      meta.n++
+      const f = String(v.from).toLowerCase()
+      meta.by[f] = (meta.by[f] ?? 0) + 1
+    }
+    return meta
+  }
+
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
 
     // অন্য ইউজারের মেসেজ এখানে জমা হয়
     if (url.pathname === '/deliver') {
       const m = await req.json<any>()
-      const pending = await this.ctx.storage.list({ prefix: 'msg:', limit: 500 })
-      if (pending.size >= 500) return new Response('full', { status: 429 })
+      // কাউন্টার দিয়ে সীমা দেখা: প্রতিবার ৫০০টি সারি পড়তে হয় না; একজন প্রেরক পুরো ইনবক্স ভরতে পারে না
+      const meta = await this.getMeta()
+      const sender = String(m.from).toLowerCase()
+      if (meta.n >= MAX_PENDING || (meta.by[sender] ?? 0) >= MAX_PER_SENDER)
+        return new Response('full', { status: 429 })
       const { uid, quiet, ...rest } = m // uid/quiet ক্লায়েন্টে বা স্টোরেজে যায় না
       const msg = { k: `msg:${m.ts}:${m.id}`, ...rest }
-      await this.ctx.storage.put(msg.k, msg)
+      meta.n++
+      meta.by[sender] = (meta.by[sender] ?? 0) + 1
+      await this.ctx.storage.put({ [msg.k]: msg, meta })
       for (const ws of this.ctx.getWebSockets())
         ws.send(JSON.stringify({ type: 'msg', ...msg }))
       if (!quiet && uid) this.ctx.waitUntil(this.push(uid)) // রিসিপ্টে নোটিফিকেশন নয়
@@ -647,6 +713,11 @@ export class Inbox extends DurableObject<Env> {
     }
   }
 
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    this.hits.delete(ws)
+    try { ws.close(code, reason) } catch { /* আগেই বন্ধ */ }
+  }
+
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
     if (typeof raw !== 'string') return
     const me = ws.deserializeAttachment() as { username: string }
@@ -655,7 +726,14 @@ export class Inbox extends DurableObject<Env> {
 
     // রিসিভ নিশ্চিত: এবার মুছে ফেলুন
     if (d.type === 'ack' && typeof d.k === 'string' && d.k.startsWith('msg:')) {
-      await this.ctx.storage.delete(d.k)
+      const old = await this.ctx.storage.get<any>(d.k)
+      if (old && (await this.ctx.storage.delete(d.k))) {
+        const meta = await this.getMeta()
+        const f = String(old.from).toLowerCase()
+        meta.n = Math.max(0, meta.n - 1)
+        if ((meta.by[f] = (meta.by[f] ?? 1) - 1) <= 0) delete meta.by[f]
+        await this.ctx.storage.put('meta', meta)
+      }
       return
     }
 
