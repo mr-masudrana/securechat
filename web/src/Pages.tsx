@@ -1,4 +1,5 @@
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import Icon from './Icon'
 import { call } from './api'
 import { fingerprint, type Identity } from './crypto'
@@ -9,7 +10,7 @@ import { getThemePref, setThemePref, type Theme } from './theme'
 import type { Session } from './types'
 
 // ---------- সাধারণ অংশ ----------
-function PageShell({ title, onBack, right, children }: { title: string; onBack: () => void; right?: ReactNode; children: ReactNode }) {
+export function PageShell({ title, onBack, right, children }: { title: string; onBack: () => void; right?: ReactNode; children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-40 bg-slate-900 text-white flex flex-col">
       <header className="flex items-center gap-2 p-3 border-b border-slate-800">
@@ -23,7 +24,42 @@ function PageShell({ title, onBack, right, children }: { title: string; onBack: 
     </div>
   )
 }
-const Card = ({ title, children }: { title?: string; children: ReactNode }) => (
+// ফুল স্ক্রিন ছবি: ছবিতে চাপলে জুম, বাইরে চাপলে/Esc/ব্যাক বাটনে বন্ধ
+export function Lightbox({ src, name, onClose }: { src: string; name?: string; onClose: () => void }) {
+  const [zoom, setZoom] = useState(false)
+  const close = () => { if (history.state?.viewer) history.back(); else onClose() }
+  useEffect(() => {
+    history.pushState({ ...(history.state ?? {}), viewer: true }, '', location.href)
+    const pop = () => onClose()
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    window.addEventListener('popstate', pop)
+    window.addEventListener('keydown', key)
+    return () => { window.removeEventListener('popstate', pop); window.removeEventListener('keydown', key) }
+  }, [])
+  const btn = { background: 'rgba(255,255,255,.18)', color: '#fff' }
+  // body-তে রেন্ডার (সোয়াইপ-করা বাবলের transform fixed পজিশন নষ্ট না করে); ইভেন্ট নিচের বাবলে যেতে দেওয়া হয় না
+  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation()
+  return createPortal(
+    <div className="fixed inset-0 z-[60] bg-black flex items-center justify-center overflow-auto" style={{ color: '#fff' }}
+      onClick={e => { e.stopPropagation(); close() }} onTouchStart={stop} onTouchMove={stop} onTouchEnd={stop}
+      onPointerDown={stop} onContextMenu={stop}>
+      <div className="absolute top-0 inset-x-0 z-10 flex justify-end gap-2 p-3" style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}>
+        {name && (
+          <a href={src} download={name} onClick={e => e.stopPropagation()} style={btn} className="size-10 grid place-items-center rounded-full">
+            <Icon name="download" className="size-5" />
+          </a>
+        )}
+        <button onClick={e => { e.stopPropagation(); close() }} style={btn} className="size-10 grid place-items-center rounded-full" title="বন্ধ করুন">
+          <Icon name="x" className="size-5" />
+        </button>
+      </div>
+      <img src={src} alt="" draggable={false} onClick={e => { e.stopPropagation(); setZoom(z => !z) }}
+        className={`max-h-full max-w-full object-contain transition-transform duration-200 ${zoom ? 'scale-200 cursor-zoom-out' : 'cursor-zoom-in'}`} />
+    </div>,
+    document.body,
+  )
+}
+export const Card = ({ title, children }: { title?: string; children: ReactNode }) => (
   <section className="rounded-xl bg-slate-800 p-4 space-y-3">
     {title && <h2 className="text-sm font-semibold text-slate-300">{title}</h2>}
     {children}
@@ -103,6 +139,7 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
   const [d, setD] = useState({ name: '', bio: '', gender: '', birth: '' })
   const [ok, setOk] = useState('')
   const [uname, setUname] = useState(false)
+  const [view, setView] = useState(false)
   const { busy, err, setErr, run } = useRun()
 
   const start = () => {
@@ -141,7 +178,7 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
             </span>
             <input type="file" accept="image/*" className="hidden" onChange={onAvatar} />
           </label>
-        ) : pic}
+        ) : avatar ? <button onClick={() => setView(true)}>{pic}</button> : pic}
         {!editing && (
           <>
             <p className="text-xl font-semibold pt-2">{session.fullName}</p>
@@ -149,6 +186,7 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
           </>
         )}
       </div>
+      {view && avatar && <Lightbox src={avatar} onClose={() => setView(false)} />}
       {ok && <p className="text-sm text-emerald-400 text-center">{ok}</p>}
 
       {!editing ? (

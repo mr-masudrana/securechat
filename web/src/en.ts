@@ -1,5 +1,6 @@
 // বাংলা লেখা → ইংরেজি অনুবাদ। বাংলা লেখাই কী, তাই নতুন বাংলা লেখা যোগ করলে এখানেও এন্ট্রি দিন।
 export const EN: Record<string, string> = {
+ "প্রোফাইল": "Profile",
  "এই ডিভাইস থেকে চ্যাট মুছুন": "Delete chat from this device",
  "এই চ্যাট মুছুন": "Delete this chat",
  "এই ডিভাইস থেকে এই চ্যাটের সব মেসেজ মুছে যাবে। অন্যজনের ডিভাইসে প্রভাব পড়বে না।": "All messages of this chat will be deleted from this device. The other person's device is not affected.",

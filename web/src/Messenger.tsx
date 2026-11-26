@@ -10,7 +10,7 @@ import { useProfile } from './profiles'
 import Icon, { type IconName } from './Icon'
 import { beep, readReceiptsOn, soundOn } from './notify'
 import { syncPush } from './push'
-import { AccountPage, PrivacyPage, SettingsPage } from './Pages'
+import { AccountPage, Card, Lightbox, PageShell, PrivacyPage, SettingsPage } from './Pages'
 import { locale, t } from './i18n'
 import type { Session } from './types'
 
@@ -87,6 +87,12 @@ const pageFromHash = (): PageName | null => {
   return m ? (m[1] as PageName) : null
 }
 
+// অন্যের প্রোফাইল পেজ: #u/username
+const profileFromHash = () => {
+  const m = location.hash.match(/^#u\/(.+)$/)
+  try { return m ? decodeURIComponent(m[1]) : null } catch { return null }
+}
+
 // খোলা চ্যাট URL-এর হ্যাশে থাকে (#c/username): রিফ্রেশে ফিরে আসে, ব্যাক বাটনে লিস্টে যায়
 const fromHash = () => {
   const m = location.hash.match(/^#c\/(.+)$/)
@@ -100,7 +106,14 @@ export default function Messenger({ session, onLogout, onSession }: {
   const owner = username.toLowerCase()
   const [msgs, setMsgs] = useState<StoredMsg[]>([])
   const [online, setOnline] = useState(false)
-  const [active, setActive] = useState<string | null>(fromHash)
+  const [active, setActive] = useState<string | null>(() => fromHash() ?? profileFromHash())
+  const [profilePeer, setProfilePeer] = useState<string | null>(null)
+  const [profileRev, setProfileRev] = useState(0)
+  const openProfile = (p: string) => { history.pushState({ profile: p }, '', '#u/' + encodeURIComponent(p)); setProfilePeer(p) }
+  const closeProfile = () => {
+    if (history.state?.profile) history.back() // popstate এসে profilePeer খালি করবে
+    else { setProfilePeer(null); setProfileRev(r => r + 1) }
+  }
   const [reads, setReads] = useState<Record<string, number>>({})
   const [toast, setToast] = useState('')
   const [newChat, setNewChat] = useState(false)
@@ -310,12 +323,17 @@ export default function Messenger({ session, onLogout, onSession }: {
 
   // ব্যাক বাটন/সোয়াইপ: চ্যাট থেকে লিস্টে ফেরা (অ্যাপ থেকে বের হয় না)
   useEffect(() => {
-    const c = fromHash(), p = pageFromHash(), h = location.hash
+    const c = fromHash() ?? profileFromHash(), p = pageFromHash(), h = c ? '#c/' + encodeURIComponent(c) : location.hash
     if ((c || p) && !history.state?.chat && !history.state?.page) { // সরাসরি লিংকে খুললে নিচে লিস্টের একটা এন্ট্রি বসাই
       history.replaceState(null, '', location.pathname + location.search)
       history.pushState(c ? { chat: c } : { page: p }, '', h)
     }
-    const onPop = () => { setActive(fromHash()); setPage(pageFromHash()) }
+    const onPop = () => {
+      const u = profileFromHash()
+      setProfilePeer(u)
+      if (!u) { setActive(fromHash()); setProfileRev(r => r + 1) }
+      setPage(pageFromHash())
+    }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -459,7 +477,8 @@ export default function Messenger({ session, onLogout, onSession }: {
   const deleteChat = async (peer: string) => {
     await deleteChatLocal(username, peer)
     setMsgs(l => l.filter(m => m.peer.toLowerCase() !== peer.toLowerCase()))
-    closeChat()
+    if (history.state?.profile) { setProfilePeer(null); history.go(-2) } // প্রোফাইল ও চ্যাটের এন্ট্রি পেরিয়ে লিস্টে
+    else closeChat()
   }
   const closeChat = () => {
     if (history.state?.chat) history.back() // popstate এসে active খালি করবে
@@ -612,7 +631,7 @@ export default function Messenger({ session, onLogout, onSession }: {
             list={msgs.filter(m => m.peer.toLowerCase() === active.toLowerCase())}
             onSend={sendText} onSendFile={sendFile} onDownload={downloadFile}
             act={{ react, pin, edit, del, forward }} peers={convos.map(c => c.peer)}
-            onDeleteChat={deleteChat} onBack={closeChat} />
+            onOpenProfile={openProfile} rev={profileRev} onBack={closeChat} />
         ) : (
           <div className="flex-1 grid place-items-center text-slate-500">একটা চ্যাট বেছে নিন</div>
         )}
@@ -635,6 +654,9 @@ export default function Messenger({ session, onLogout, onSession }: {
       )}
       {page === 'privacy' && (
         <PrivacyPage session={session} identity={identity} onPatch={onSession} onClearAll={clearAll} onBack={closePage} />
+      )}
+      {profilePeer && (
+        <PeerProfilePage peer={profilePeer} session={session} onBack={closeProfile} onDelete={() => deleteChat(profilePeer)} />
       )}
       {page === 'settings' && <SettingsPage token={token} onBack={closePage} />}
       {toast && (
@@ -670,6 +692,7 @@ function Media({ m, state, onDownload }: {
   const f = m.file!
   const audio = isAudio(f.m)
   const [url, setUrl] = useState('')
+  const [view, setView] = useState(false)
 
   useEffect(() => {
     if (!m.blob) return setUrl('')
@@ -682,8 +705,9 @@ function Media({ m, state, onDownload }: {
     <div className="space-y-1">
       {audio && url && <Voice url={url} dur={f.d ?? 0} />}
       {isImg(f.m) && (url
-        ? <img src={url} alt={f.n} className="rounded-lg max-h-72 max-w-full" />
+        ? <img src={url} alt={f.n} onClick={() => setView(true)} className="rounded-lg max-h-72 max-w-full cursor-zoom-in" />
         : f.th && <img src={f.th} alt="" className="rounded-lg max-h-72 max-w-full blur-sm" />)}
+      {view && url && <Lightbox src={url} name={f.n} onClose={() => setView(false)} />}
       {!(audio && url) && (
         <p className="text-sm break-all">
           <span className="inline-flex items-center gap-1"><Icon name={audio ? 'mic' : 'file'} className="size-4 shrink-0" />{audio ? 'ভয়েস মেসেজ' : f.n}</span>{' '}
@@ -705,20 +729,18 @@ function Media({ m, state, onDownload }: {
   )
 }
 
-function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onDeleteChat, onBack }: {
+function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onOpenProfile, rev, onBack }: {
   peer: string; session: Session; list: StoredMsg[]; dl: DlState
   act: Actions; peers: string[]
   onSend: (peer: string, text: string, q?: Quote) => Promise<boolean>
   onSendFile: (peer: string, file: File, caption: string, dur?: number, q?: Quote) => Promise<boolean>
   onDownload: (m: StoredMsg) => void
-  onDeleteChat: (peer: string) => Promise<void>
+  onOpenProfile: (peer: string) => void; rev: number
   onBack: () => void
 }) {
   const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
-  const [safety, setSafety] = useState(false)
-  const [profile, setProfile] = useState(false)
   const [keyChanged, setKeyChanged] = useState(false)
   const [verified, setVerified] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
@@ -870,7 +892,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       setVerified(!!v && v === u.publicKey)
       setKeyChanged((!!v && !!u.publicKey && v !== u.publicKey) || pinChanged(peer))
     }).catch(() => {})
-  }, [])
+  }, [rev])
 
   const submit = async () => {
     const t = text.trim()
@@ -895,7 +917,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     <>
       <header className="flex items-center gap-3 p-3 border-b border-slate-800">
         <button onClick={onBack} className="md:hidden px-1 text-slate-300"><Icon name="back" className="size-6" /></button>
-        <button onClick={() => setProfile(true)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
+        <button onClick={() => onOpenProfile(peer)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
         <PeerAvatar peer={peer} token={session.token} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold truncate">{prof?.fullName || '@' + peer}</p>
@@ -1039,45 +1061,48 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
         <ForwardDialog peers={peers.filter(p => p.toLowerCase() !== peer.toLowerCase())} token={session.token}
           onPick={async p => { if (await act.forward(fwd, p)) setFwd(null) }} onClose={() => setFwd(null)} />
       )}
-      {profile && (
-        <PeerProfile peer={peer} session={session} verified={verified}
-          onSafety={() => { setProfile(false); setSafety(true) }}
-          onDelete={async () => { setProfile(false); await onDeleteChat(peer) }}
-          onClose={() => setProfile(false)} />
-      )}
-      {safety && (
-        <SafetyDialog peer={peer} session={session} vk={vk} onClose={ok => {
-          setSafety(false)
-          if (ok) { acceptKey(peer); setVerified(true); setKeyChanged(false) }
-        }} />
-      )}
     </>
   )
 }
 
-function PeerProfile({ peer, session, verified, onSafety, onDelete, onClose }: {
-  peer: string; session: Session; verified: boolean
-  onSafety: () => void; onDelete: () => void; onClose: () => void
+function PeerProfilePage({ peer, session, onBack, onDelete }: {
+  peer: string; session: Session; onBack: () => void; onDelete: () => void
 }) {
-  const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string } | null>(null)
+  const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
+  const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string; publicKey?: string | null } | null>(null)
+  const [verified, setVerified] = useState(false)
+  const [safety, setSafety] = useState(false)
   const [confirm, setConfirm] = useState(false)
-  useEffect(() => { lookupUser(peer, session.token).then(setU).catch(() => setU({})) }, [])
+  const [view, setView] = useState(false)
+  useEffect(() => {
+    lookupUser(peer, session.token).then(r => {
+      setU(r)
+      const v = localStorage.getItem(vk)
+      setVerified(!!v && v === r.publicKey)
+    }).catch(() => setU({}))
+  }, [peer])
   const name = u?.fullName || peer
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center p-4 z-30" onClick={onClose}>
-      <div className="w-full max-w-sm bg-slate-800 rounded-xl p-5 space-y-4 text-center" onClick={e => e.stopPropagation()}>
+    <PageShell title="প্রোফাইল" onBack={onBack}>
+      <div className="flex flex-col items-center gap-1 pt-2">
         {u?.avatar
-          ? <img src={u.avatar} alt="" className="mx-auto size-28 rounded-full object-cover" />
-          : <div className="mx-auto size-28 rounded-full bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
-        <div>
-          <p className="text-lg font-semibold break-words">{name}</p>
-          <p className="text-sm text-slate-400">@{peer}</p>
-        </div>
-        <p className="text-sm text-slate-300 break-words whitespace-pre-wrap">{u === null ? '…' : u.bio || 'কোনো bio নেই'}</p>
-        <button onClick={onSafety} className="w-full rounded-lg bg-slate-700 py-3 flex items-center justify-center gap-2">
-          <Icon name={verified ? 'shield' : 'lock'} className="size-4 text-emerald-400" />
-          নিরাপত্তা যাচাই (সেফটি নাম্বার)
-        </button>
+          ? <button onClick={() => setView(true)}><img src={u.avatar} alt="" className="size-28 rounded-full object-cover" /></button>
+          : <div className="size-28 rounded-full bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
+        <p className="text-xl font-semibold break-words text-center mt-2">{name}</p>
+        <p className="text-sm text-slate-400">@{peer}</p>
+      </div>
+      {view && u?.avatar && <Lightbox src={u.avatar} onClose={() => setView(false)} />}
+      <Card title="Bio">
+        <p className="break-words whitespace-pre-wrap">{u === null ? '…' : u.bio || 'কোনো bio নেই'}</p>
+      </Card>
+      <Card title="নিরাপত্তা">
+        <p className="text-sm text-slate-300 flex items-center gap-2">
+          <Icon name={verified ? 'shield' : 'lock'} className="size-4 text-emerald-400 shrink-0" />
+          {verified ? 'ভেরিফাইড' : 'এন্ড-টু-এন্ড এনক্রিপ্টেড'}
+        </p>
+        <button onClick={() => setSafety(true)} className="w-full rounded-lg bg-slate-700 py-3">নিরাপত্তা যাচাই (সেফটি নাম্বার)</button>
+      </Card>
+      <Card>
         {confirm ? (
           <div className="space-y-2">
             <p className="text-sm text-slate-300">এই ডিভাইস থেকে এই চ্যাটের সব মেসেজ মুছে যাবে। অন্যজনের ডিভাইসে প্রভাব পড়বে না।</p>
@@ -1087,11 +1112,16 @@ function PeerProfile({ peer, session, verified, onSafety, onDelete, onClose }: {
             </div>
           </div>
         ) : (
-          <button onClick={() => setConfirm(true)} className="w-full text-sm text-red-400 py-2">এই ডিভাইস থেকে চ্যাট মুছুন</button>
+          <button onClick={() => setConfirm(true)} className="w-full text-red-400 py-2">এই ডিভাইস থেকে চ্যাট মুছুন</button>
         )}
-        <button onClick={onClose} className="w-full text-sm text-slate-400">বন্ধ করুন</button>
-      </div>
-    </div>
+      </Card>
+      {safety && (
+        <SafetyDialog peer={peer} session={session} vk={vk} onClose={ok => {
+          setSafety(false)
+          if (ok) { acceptKey(peer); setVerified(true) }
+        }} />
+      )}
+    </PageShell>
   )
 }
 
