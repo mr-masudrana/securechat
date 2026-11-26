@@ -1,5 +1,10 @@
 // বাংলা লেখা → ইংরেজি অনুবাদ। বাংলা লেখাই কী, তাই নতুন বাংলা লেখা যোগ করলে এখানেও এন্ট্রি দিন।
 export const EN: Record<string, string> = {
+ "এই ডিভাইস থেকে চ্যাট মুছুন": "Delete chat from this device",
+ "এই চ্যাট মুছুন": "Delete this chat",
+ "এই ডিভাইস থেকে এই চ্যাটের সব মেসেজ মুছে যাবে। অন্যজনের ডিভাইসে প্রভাব পড়বে না।": "All messages of this chat will be deleted from this device. The other person's device is not affected.",
+ "নিরাপত্তা যাচাই (সেফটি নাম্বার)": "Verify security (safety number)",
+ "কোনো bio নেই": "No bio",
  "! একটা username বেছে নিন (পরে মাসে একবার বদলানো যাবে)।": "! Choose a username (you can change it once a month later).",
  "বুঝেছি, নতুন কী মেনে নিলাম": "Got it, accept the new key",
  "-এর সেফটি নাম্বার": "'s safety number",
@@ -168,7 +173,7 @@ export const EN: Record<string, string> = {
  "সেশন শেষ হয়েছে, আবার লগইন করুন": "Session expired, please log in again",
  "স্বাগতম,": "Welcome,",
  "\"পড়েছি\" রিসিপ্ট পাঠান": "Send \"read\" receipts",
- "-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। \"নিরাপত্তা\" থেকে সেফটি নাম্বার মিলিয়ে নিন।": "'s security key has changed. This is normal if they logged in on a new device, but there could be other reasons. Check the safety number under \"Security\".",
+ "-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। নাম/ছবিতে চেপে প্রোফাইল থেকে সেফটি নাম্বার মিলিয়ে নিন।": "'s security key has changed. This is normal if they logged in on a new device, but there could be other reasons. Tap their name/photo to open the profile and check the safety number.",
  "Username বদলান": "Change username",
  "iPhone-এ আগে Safari-র Share মেনু থেকে \"Add to Home Screen\" করে সেই অ্যাপ খুলুন।": "On iPhone, first use Safari's Share menu to \"Add to Home Screen\", then open that app.",
  "অনুমতি দেওয়া আছে": "Permission granted",

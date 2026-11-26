@@ -404,10 +404,10 @@ export default {
         let name: string
         try { name = decodeURIComponent(pathname.slice('/api/users/'.length)) } catch { return json({ error: 'Not found' }, 404) }
         const u = await env.DB.prepare(
-          'SELECT username, full_name, avatar, public_key FROM users WHERE username = ? AND profile_done = 1')
+          'SELECT username, full_name, avatar, public_key, bio FROM users WHERE username = ? AND profile_done = 1')
           .bind(name).first<any>()
         return u
-          ? json({ username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key })
+          ? json({ username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key, bio: u.bio || '' })
           : json({ error: 'Not found' }, 404)
       }
 

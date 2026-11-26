@@ -92,7 +92,7 @@ export async function fingerprint(pubB64: string) {
 
 export async function lookupUser(peer: string, token: string) {
   const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
-    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null }
+    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string }
   // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
   if (u.publicKey) {
     const n = u.username.toLowerCase()
@@ -288,6 +288,25 @@ export async function clearMessages(owner: string) {
     c.onsuccess = () => {
       const cur = c.result
       if (cur) { s.delete(cur.primaryKey); cur.continue() }
+    }
+    tx.oncomplete = () => res()
+    tx.onerror = tx.onabort = () => rej(tx.error)
+  })
+}
+
+// শুধু এই ডিভাইসের একটা চ্যাটের সব মেসেজ মোছে (অন্যের ডিভাইসে প্রভাব নেই)
+export async function deleteChat(owner: string, peer: string) {
+  const db = await openDB()
+  const p = peer.toLowerCase()
+  return new Promise<void>((res, rej) => {
+    const tx = db.transaction(MSGS, 'readwrite')
+    const s = tx.objectStore(MSGS)
+    const c = s.index('owner').openCursor(IDBKeyRange.only(owner.toLowerCase()))
+    c.onsuccess = () => {
+      const cur = c.result
+      if (!cur) return
+      if ((cur.value as StoredMsg).peer.toLowerCase() === p) cur.delete()
+      cur.continue()
     }
     tx.oncomplete = () => res()
     tx.onerror = tx.onabort = () => rej(tx.error)

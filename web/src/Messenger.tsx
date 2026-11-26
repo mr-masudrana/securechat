@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type C
 import { connect, type Conn } from './socket'
 import { call, downloadBlob, uploadBlob } from './api'
 import {
-  acceptKey, pinChanged, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
+  acceptKey, pinChanged, deleteChat as deleteChatLocal, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
   MAX_FILE, patchMessage, safetyNumber, saveMessage, type Body, type FileMeta, type Quote, type StoredMsg,
 } from './crypto'
 import { fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType } from './media'
@@ -456,6 +456,11 @@ export default function Messenger({ session, onLogout, onSession }: {
     setActive(peer)
     sendReads(peer)
   }
+  const deleteChat = async (peer: string) => {
+    await deleteChatLocal(username, peer)
+    setMsgs(l => l.filter(m => m.peer.toLowerCase() !== peer.toLowerCase()))
+    closeChat()
+  }
   const closeChat = () => {
     if (history.state?.chat) history.back() // popstate এসে active খালি করবে
     else { setActive(null); history.replaceState(null, '', location.pathname + location.search) }
@@ -607,7 +612,7 @@ export default function Messenger({ session, onLogout, onSession }: {
             list={msgs.filter(m => m.peer.toLowerCase() === active.toLowerCase())}
             onSend={sendText} onSendFile={sendFile} onDownload={downloadFile}
             act={{ react, pin, edit, del, forward }} peers={convos.map(c => c.peer)}
-            onBack={closeChat} />
+            onDeleteChat={deleteChat} onBack={closeChat} />
         ) : (
           <div className="flex-1 grid place-items-center text-slate-500">একটা চ্যাট বেছে নিন</div>
         )}
@@ -700,18 +705,20 @@ function Media({ m, state, onDownload }: {
   )
 }
 
-function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onBack }: {
+function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onDeleteChat, onBack }: {
   peer: string; session: Session; list: StoredMsg[]; dl: DlState
   act: Actions; peers: string[]
   onSend: (peer: string, text: string, q?: Quote) => Promise<boolean>
   onSendFile: (peer: string, file: File, caption: string, dur?: number, q?: Quote) => Promise<boolean>
   onDownload: (m: StoredMsg) => void
+  onDeleteChat: (peer: string) => Promise<void>
   onBack: () => void
 }) {
   const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [safety, setSafety] = useState(false)
+  const [profile, setProfile] = useState(false)
   const [keyChanged, setKeyChanged] = useState(false)
   const [verified, setVerified] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
@@ -888,17 +895,18 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     <>
       <header className="flex items-center gap-3 p-3 border-b border-slate-800">
         <button onClick={onBack} className="md:hidden px-1 text-slate-300"><Icon name="back" className="size-6" /></button>
+        <button onClick={() => setProfile(true)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
         <PeerAvatar peer={peer} token={session.token} />
         <div className="flex-1 min-w-0">
           <p className="font-semibold truncate">{prof?.fullName || '@' + peer}</p>
           <p className="text-xs text-slate-400 flex items-center gap-1">{prof ? '@' + peer + ' · ' : ''}{verified ? <><Icon name="shield" className="size-3.5 text-emerald-400" />ভেরিফাইড</> : <><Icon name="lock" className="size-3.5" />এন্ড-টু-এন্ড এনক্রিপ্টেড</>}</p>
         </div>
-        <button onClick={() => setSafety(true)} className="text-sm text-emerald-400 px-2">নিরাপত্তা</button>
+        </button>
       </header>
 
       {keyChanged && (
         <div className="bg-red-900 text-sm p-3">
-          <Icon name="alert" className="size-4 inline -mt-0.5" /> @{peer}-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। "নিরাপত্তা" থেকে সেফটি নাম্বার মিলিয়ে নিন।
+          <Icon name="alert" className="size-4 inline -mt-0.5" /> @{peer}-এর নিরাপত্তা কী বদলে গেছে। নতুন ডিভাইসে লগইন করলে এটা স্বাভাবিক, কিন্তু অন্য কারণও হতে পারে। নাম/ছবিতে চেপে প্রোফাইল থেকে সেফটি নাম্বার মিলিয়ে নিন।
           <button className="block mt-2 underline" onClick={() => {
             acceptKey(peer); localStorage.removeItem(vk); setVerified(false); setKeyChanged(false)
           }}>বুঝেছি, নতুন কী মেনে নিলাম</button>
@@ -1031,6 +1039,12 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
         <ForwardDialog peers={peers.filter(p => p.toLowerCase() !== peer.toLowerCase())} token={session.token}
           onPick={async p => { if (await act.forward(fwd, p)) setFwd(null) }} onClose={() => setFwd(null)} />
       )}
+      {profile && (
+        <PeerProfile peer={peer} session={session} verified={verified}
+          onSafety={() => { setProfile(false); setSafety(true) }}
+          onDelete={async () => { setProfile(false); await onDeleteChat(peer) }}
+          onClose={() => setProfile(false)} />
+      )}
       {safety && (
         <SafetyDialog peer={peer} session={session} vk={vk} onClose={ok => {
           setSafety(false)
@@ -1038,6 +1052,46 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
         }} />
       )}
     </>
+  )
+}
+
+function PeerProfile({ peer, session, verified, onSafety, onDelete, onClose }: {
+  peer: string; session: Session; verified: boolean
+  onSafety: () => void; onDelete: () => void; onClose: () => void
+}) {
+  const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string } | null>(null)
+  const [confirm, setConfirm] = useState(false)
+  useEffect(() => { lookupUser(peer, session.token).then(setU).catch(() => setU({})) }, [])
+  const name = u?.fullName || peer
+  return (
+    <div className="fixed inset-0 bg-black/60 grid place-items-center p-4 z-30" onClick={onClose}>
+      <div className="w-full max-w-sm bg-slate-800 rounded-xl p-5 space-y-4 text-center" onClick={e => e.stopPropagation()}>
+        {u?.avatar
+          ? <img src={u.avatar} alt="" className="mx-auto size-28 rounded-full object-cover" />
+          : <div className="mx-auto size-28 rounded-full bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
+        <div>
+          <p className="text-lg font-semibold break-words">{name}</p>
+          <p className="text-sm text-slate-400">@{peer}</p>
+        </div>
+        <p className="text-sm text-slate-300 break-words whitespace-pre-wrap">{u === null ? '…' : u.bio || 'কোনো bio নেই'}</p>
+        <button onClick={onSafety} className="w-full rounded-lg bg-slate-700 py-3 flex items-center justify-center gap-2">
+          <Icon name={verified ? 'shield' : 'lock'} className="size-4 text-emerald-400" />
+          নিরাপত্তা যাচাই (সেফটি নাম্বার)
+        </button>
+        {confirm ? (
+          <div className="space-y-2">
+            <p className="text-sm text-slate-300">এই ডিভাইস থেকে এই চ্যাটের সব মেসেজ মুছে যাবে। অন্যজনের ডিভাইসে প্রভাব পড়বে না।</p>
+            <div className="flex gap-2">
+              <button onClick={() => setConfirm(false)} className="flex-1 rounded-lg bg-slate-700 py-3">বাতিল</button>
+              <button onClick={onDelete} className="flex-1 rounded-lg bg-red-600 py-3 font-semibold text-white">এই চ্যাট মুছুন</button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => setConfirm(true)} className="w-full text-sm text-red-400 py-2">এই ডিভাইস থেকে চ্যাট মুছুন</button>
+        )}
+        <button onClick={onClose} className="w-full text-sm text-slate-400">বন্ধ করুন</button>
+      </div>
+    </div>
   )
 }
 
