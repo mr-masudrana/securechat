@@ -2,16 +2,17 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type C
 import { connect, type Conn } from './socket'
 import { call, downloadBlob, uploadBlob } from './api'
 import {
-  acceptKey, pinChanged, deleteChat as deleteChatLocal, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
+  acceptKey, deleteIdentity, forgetKey, pinChanged, deleteChat as deleteChatLocal, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
   MAX_FILE, patchMessage, safetyNumber, saveMessage, type Body, type FileMeta, type Quote, type StoredMsg,
 } from './crypto'
 import { fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType } from './media'
-import { useProfile } from './profiles'
+import { usePresence, useProfile } from './profiles'
+import { RichText } from './RichText'
 import Icon, { type IconName } from './Icon'
 import { beep, readReceiptsOn, soundOn } from './notify'
 import { syncPush } from './push'
-import { AccountPage, Card, Lightbox, PageShell, PrivacyPage, SettingsPage } from './Pages'
-import { locale, t } from './i18n'
+import { AccountPage, Card, Lightbox, PageShell, PrivacyPage, SettingsPage, fmtBirth, genderLabel } from './Pages'
+import { locale, raw, t } from './i18n'
 import type { Session } from './types'
 
 const AUTO_MAX = 10 * 1024 * 1024
@@ -22,8 +23,11 @@ type Actions = {
   edit: (m: StoredMsg, text: string) => Promise<boolean>
   del: (m: StoredMsg, everyone: boolean) => Promise<void>
   forward: (m: StoredMsg, peer: string) => Promise<boolean>
+  retry: (m: StoredMsg) => Promise<void>
+  openUser: (name: string) => void
 }
 const EDIT_WINDOW = 15 * 60_000
+const SEND_TIMEOUT = 20_000 // সার্ভারের 'sent' না এলে এতক্ষণ পর ⚠ দেখানো হয়
 const idOf = (m: StoredMsg) => m.mid.split('|').pop()!
 // "সবার থেকে ডিলিট" হলে বিষয়বস্তু মুছে শুধু চিহ্ন থাকে
 const tomb = (m: StoredMsg): StoredMsg => ({
@@ -40,6 +44,15 @@ const mergeAll = (cur: StoredMsg[], add: StoredMsg[]) => {
 const hhmm = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 // চ্যাটের তারিখ-লেবেল: আজ / গতকাল / সপ্তাহের বার / পুরো তারিখ
 const dayKey = (ts: number) => new Date(ts).toDateString()
+// অনলাইন / সর্বশেষ দেখা (মালিক দেখাতে না দিলে কিছুই দেখায় না)
+function PresenceLine({ peer, token }: { peer: string; token: string }) {
+  const p = usePresence(peer, token)
+  if (!p?.visible) return null
+  if (p.online) return <p className="text-xs text-emerald-400 flex items-center gap-1"><span className="size-2 rounded-full bg-emerald-400" />অনলাইন</p>
+  if (!p.lastSeen) return null
+  return <p className="text-xs text-slate-400">{'সর্বশেষ দেখা '}{dayLabel(p.lastSeen)}{' '}{hhmm(p.lastSeen)}</p>
+}
+
 function dayLabel(ts: number) {
   const d = new Date(ts)
   const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
@@ -128,6 +141,33 @@ export default function Messenger({ session, onLogout, onSession }: {
     else { setPage(null); history.replaceState(null, '', location.pathname + location.search) }
   }
   const [loaded, setLoaded] = useState(false)
+  // একই অ্যাকাউন্ট অন্য ডিভাইসে খোলা হলে সার্ভারের কী আলাদা হয়ে যায়; তখন এই ডিভাইস নতুন মেসেজ পড়তে পারে না
+  const [stale, setStale] = useState(false)
+  const staleRef = useRef(false)
+  staleRef.current = stale
+  const checkStale = async () => {
+    const me = await call('/api/me', 'GET', undefined, token)
+    return !!me.publicKey && me.publicKey !== identity.publicKeyB64
+  }
+  const takeOver = async () => {
+    try { await call('/api/key', 'PUT', { publicKey: identity.publicKeyB64 }, token); setStale(false) }
+    catch (e: any) { setToast(e.message) }
+  }
+  const removeAvatar = async () => {
+    try { await call('/api/profile', 'POST', { avatar: '' }, token); setMyAvatar(null) }
+    catch (err: any) { setToast(err.message || 'ছবি সরানো যায়নি') }
+  }
+  // অ্যাকাউন্ট ডিলিট: সার্ভার থেকে মুছে, এই ডিভাইসের চ্যাট, কী ও সেভ করা তথ্যও মোছা (সেটিংস pref: থাকে)
+  const deleteAccount = async (pw: string) => {
+    await call('/api/account/delete', 'POST', { current: pw }, token)
+    await clearMessages(username).catch(() => {})
+    await deleteIdentity(session.id, username).catch(() => {})
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i)
+      if (k && !k.startsWith('pref:')) localStorage.removeItem(k)
+    }
+    onLogout()
+  }
   const changeUsername = async (name: string, current: string) => {
     const r = await call('/api/account/username', 'POST', { username: name, current }, token)
     await renameOwner(username, r.username) // এই ডিভাইসের ইতিহাস নতুন নামে সরানো
@@ -361,7 +401,7 @@ export default function Messenger({ session, onLogout, onSession }: {
     return () => clearTimeout(t)
   }, [toast])
 
-  // ফাইল ডাউনলোড → ডিক্রিপ্ট → লোকাল সেভ → তারপর R2 থেকে মুছে ফেলা
+  // ফাইল ডাউনলোড → ডিক্রিপ্ট → লোকাল সেভ → তারপর KV থেকে মুছে ফেলা
   const downloadFile = async (m: StoredMsg) => {
     if (!m.file || m.blob || m.gone || dlBusy.current.has(m.mid)) return
     dlBusy.current.add(m.mid)
@@ -396,7 +436,10 @@ export default function Messenger({ session, onLogout, onSession }: {
     loadMessages(username).then(stored => {
       if (!alive) return
       setLoaded(true)
-      setMsgs(cur => mergeAll(cur, stored))
+      // আগের সেশনে 'পাঠানো হচ্ছে' অবস্থায় আটকে থাকা মেসেজ আর যাচ্ছে না: ⚠ দেখিয়ে আবার পাঠানোর সুযোগ দিই
+      const stuck = new Set(stored.filter(m => m.mine && m.status === 'sending').map(m => m.mid))
+      stuck.forEach(mid => void patchMessage(mid, { status: 'failed' }))
+      setMsgs(cur => mergeAll(cur, stored.map(m => (stuck.has(m.mid) ? { ...m, status: 'failed' as const } : m))))
       stored.filter(autoable).forEach(m => void downloadFile(m))
     })
     conn.current = connect(token, {
@@ -404,7 +447,15 @@ export default function Messenger({ session, onLogout, onSession }: {
       onError: setToast,
       onSent: id => void setStatus(`${owner}|out|${id}`, 'sent'),
       onMsg: async m => {
-        const body = await decryptBody(identity, username, m.from, token, m.payload)
+        // অন্য ডিভাইস কী কেড়ে নিয়ে থাকলে ack/সেভ নয়: মেসেজ সার্ভারে থেকে যাবে, ঠিক ডিভাইস পাবে
+        if (staleRef.current) throw new Error('stale')
+        let body = await decryptBody(identity, username, m.from, token, m.payload)
+        if (body === null) {
+          // হয়তো পিয়ার নতুন কী নিয়েছে আর ক্যাশে পুরনোটা ছিল: নতুন কী এনে আরেকবার
+          forgetKey(m.from)
+          body = await decryptBody(identity, username, m.from, token, m.payload)
+          if (body === null && await checkStale()) { setStale(true); throw new Error('stale') }
+        }
         if (body?.c) { // রিসিপ্ট: বাবল নয়, শুধু টিক আপডেট
           for (const id of body.c.ids)
             void setStatus(`${owner}|out|${id}`, body.c.k === 'r' ? 'read' : 'delivered', m.from)
@@ -435,6 +486,8 @@ export default function Messenger({ session, onLogout, onSession }: {
     })
     return () => { alive = false; conn.current?.close() }
   }, [token])
+
+  useEffect(() => { if (online) checkStale().then(setStale).catch(() => {}) }, [online])
 
   const convos = useMemo(() => {
     const map = new Map<string, { peer: string; last: StoredMsg; unread: number }>()
@@ -474,6 +527,24 @@ export default function Messenger({ session, onLogout, onSession }: {
     setActive(peer)
     sendReads(peer)
   }
+  // @username ট্যাপ: ইউজার থাকলে প্রোফাইল, নিজের নাম হলে অ্যাকাউন্ট পেজ
+  const openUser = async (name: string) => {
+    try {
+      const u = await lookupUser(name, token)
+      if (u.username.toLowerCase() === username.toLowerCase()) openPage('account')
+      else openProfile(u.username)
+    } catch { setToast('ইউজার পাওয়া যায়নি') }
+  }
+  // প্রোফাইল থেকে সরাসরি চ্যাট খোলা (প্রোফাইলের হিস্ট্রি এন্ট্রি চ্যাট দিয়ে বদলে যায়)
+  const chatFromProfile = (peer: string) => {
+    const lastIn = msgs.filter(m => !m.mine && m.peer.toLowerCase() === peer.toLowerCase())
+      .reduce((t, m) => Math.max(t, m.ts), 0)
+    markRead(peer, lastIn)
+    history.replaceState({ chat: peer }, '', '#c/' + encodeURIComponent(peer))
+    setProfilePeer(null)
+    setActive(peer)
+    sendReads(peer)
+  }
   const deleteChat = async (peer: string) => {
     await deleteChatLocal(username, peer)
     setMsgs(l => l.filter(m => m.peer.toLowerCase() !== peer.toLowerCase()))
@@ -505,7 +576,31 @@ export default function Messenger({ session, onLogout, onSession }: {
     await saveMessage(msg)
     setMsgs(cur => mergeAll(cur, [msg]))
     if (!conn.current?.send(canon, payload, id)) void setStatus(msg.mid, 'failed')
+    else watchSend(msg.mid)
     return true
+  }
+  // সার্ভার 'sent' না জানালে (কানেকশন ড্রপ) ⚠ দেখাই; পরে 'sent' এলে স্ট্যাটাস আবার উপরে ওঠে
+  const watchSend = (mid: string) => {
+    window.setTimeout(async () => {
+      const cur = await getMessage(mid)
+      if (cur && cur.status === 'sending') void setStatus(mid, 'failed')
+    }, SEND_TIMEOUT)
+  }
+  // ব্যর্থ মেসেজ একই id-তে আবার পাঠানো (প্রাপক আগেই পেয়ে থাকলে ডুপ্লিকেট হয় না)
+  const retry = async (m: StoredMsg) => {
+    if (!m.mine || m.deleted || m.status !== 'failed') return
+    if (!conn.current?.isOpen()) { setToast('কানেকশন নেই, একটু পরে চেষ্টা করুন'); return }
+    try {
+      const body: Body = {}
+      if (m.text) body.t = m.text
+      if (m.file) body.f = m.file
+      if (m.q) body.q = m.q
+      if (m.fw) body.fw = 1
+      const { payload, peer: canon } = await encryptBody(identity, username, m.peer, token, body)
+      await apply(m.mid, cur => ({ ...cur, status: 'sending' }))
+      if (!conn.current.send(canon, payload, idOf(m))) void setStatus(m.mid, 'failed')
+      else watchSend(m.mid)
+    } catch (e: any) { setToast(e.message) }
   }
 
   const sendText = async (peer: string, text: string, q?: Quote, fw?: boolean) => {
@@ -630,7 +725,7 @@ export default function Messenger({ session, onLogout, onSession }: {
           <ChatView key={active} peer={active} session={session} dl={dl}
             list={msgs.filter(m => m.peer.toLowerCase() === active.toLowerCase())}
             onSend={sendText} onSendFile={sendFile} onDownload={downloadFile}
-            act={{ react, pin, edit, del, forward }} peers={convos.map(c => c.peer)}
+            act={{ react, pin, edit, del, forward, retry, openUser }} peers={convos.map(c => c.peer)}
             onOpenProfile={openProfile} rev={profileRev} onBack={closeChat} />
         ) : (
           <div className="flex-1 grid place-items-center text-slate-500">একটা চ্যাট বেছে নিন</div>
@@ -649,16 +744,23 @@ export default function Messenger({ session, onLogout, onSession }: {
         </div>
       )}
       {page === 'account' && (
-        <AccountPage session={session} avatar={myAvatar} onAvatar={changeAvatar} onPatch={onSession}
+        <AccountPage session={session} avatar={myAvatar} onAvatar={changeAvatar} onRemoveAvatar={removeAvatar} onPatch={onSession}
           onUsername={changeUsername} onBack={closePage} />
       )}
       {page === 'privacy' && (
-        <PrivacyPage session={session} identity={identity} onPatch={onSession} onClearAll={clearAll} onBack={closePage} />
+        <PrivacyPage session={session} identity={identity} onPatch={onSession} onClearAll={clearAll} onDeleteAccount={deleteAccount} onBack={closePage} />
       )}
       {profilePeer && (
-        <PeerProfilePage peer={profilePeer} session={session} onBack={closeProfile} onDelete={() => deleteChat(profilePeer)} />
+        <PeerProfilePage peer={profilePeer} session={session} onBack={closeProfile} onDelete={() => deleteChat(profilePeer)}
+          onChat={active?.toLowerCase() === profilePeer.toLowerCase() ? undefined : () => chatFromProfile(profilePeer)} />
       )}
       {page === 'settings' && <SettingsPage token={token} onBack={closePage} />}
+      {stale && (
+        <div className="fixed top-0 inset-x-0 z-50 bg-amber-700 text-sm p-3 text-center">
+          এই অ্যাকাউন্ট অন্য ডিভাইসে খোলা হয়েছে, তাই এই ডিভাইসে নতুন মেসেজ পড়া যাচ্ছে না।
+          <button onClick={takeOver} className="block mx-auto mt-1 underline font-semibold">এই ডিভাইসে ব্যবহার করুন</button>
+        </div>
+      )}
       {toast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 px-4 py-2 rounded-lg text-sm">{toast}</div>
       )}
@@ -710,7 +812,7 @@ function Media({ m, state, onDownload }: {
       {view && url && <Lightbox src={url} name={f.n} onClose={() => setView(false)} />}
       {!(audio && url) && (
         <p className="text-sm break-all">
-          <span className="inline-flex items-center gap-1"><Icon name={audio ? 'mic' : 'file'} className="size-4 shrink-0" />{audio ? 'ভয়েস মেসেজ' : f.n}</span>{' '}
+          <span className="inline-flex items-center gap-1"><Icon name={audio ? 'mic' : 'file'} className="size-4 shrink-0" />{audio ? 'ভয়েস মেসেজ' : raw(f.n)}</span>{' '}
           <span className="text-white/60">· {audio ? fmtDur(f.d ?? 0) : fmtSize(f.s)}</span>
         </p>
       )}
@@ -894,6 +996,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     }).catch(() => {})
   }, [rev])
 
+  useEffect(() => { if (pinChanged(peer)) setKeyChanged(true) }, [list.length]) // নতুন মেসেজে কী বদলালে নোটিশ
   const submit = async () => {
     const t = text.trim()
     if (!t) return
@@ -902,6 +1005,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       return
     }
     if (await onSend(peer, t, makeQuote())) { setText(''); setReplyTo(null) }
+    else if (pinChanged(peer)) setKeyChanged(true) // কী বদলানোয় পাঠানো আটকেছে: নোটিশ দেখাই
   }
 
   const pick = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -910,6 +1014,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     if (!f || sending) return
     setSending(true)
     if (await onSendFile(peer, f, text.trim(), undefined, makeQuote())) { setText(''); setReplyTo(null) } // লেখা থাকলে ক্যাপশন
+    else if (pinChanged(peer)) setKeyChanged(true)
     setSending(false)
   }
 
@@ -920,8 +1025,9 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
         <button onClick={() => onOpenProfile(peer)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
         <PeerAvatar peer={peer} token={session.token} />
         <div className="flex-1 min-w-0">
-          <p className="font-semibold truncate">{prof?.fullName || '@' + peer}</p>
+          <p className="font-semibold truncate">{prof?.fullName ? raw(prof.fullName) : '@' + peer}</p>
           <p className="text-xs text-slate-400 flex items-center gap-1">{prof ? '@' + peer + ' · ' : ''}{verified ? <><Icon name="shield" className="size-3.5 text-emerald-400" />ভেরিফাইড</> : <><Icon name="lock" className="size-3.5" />এন্ড-টু-এন্ড এনক্রিপ্টেড</>}</p>
+          <PresenceLine peer={peer} token={session.token} />
         </div>
         </button>
       </header>
@@ -964,7 +1070,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
                 <button onClick={() => jump(qMid(m.q!))}
                   className="block w-full text-left border-l-4 border-emerald-300 bg-black/20 rounded px-2 py-1">
                   <span className="block text-[11px] text-emerald-300">{m.q.from.toLowerCase() === owner ? 'আপনি' : '@' + m.q.from}</span>
-                  <span className="block text-xs text-white/80 line-clamp-2">{m.q.t}</span>
+                  <span className="block text-xs text-white/80 line-clamp-2">{raw(m.q.t)}</span>
                 </button>
               )}
               {m.deleted ? (
@@ -972,12 +1078,15 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
               ) : (
                 <>
                   {m.file && <Media m={m} state={dl[m.mid]} onDownload={onDownload} />}
-                  {m.text && <p className="whitespace-pre-wrap">{m.text}</p>}
+                  {m.text && <RichText text={m.text} onMention={act.openUser} />}
                 </>
               )}
               <p className="text-[10px] text-white/60 text-right">
                 {m.pinned && <Icon name="pin" className="size-3 inline mr-1 -mt-0.5" />}{m.edited && !m.deleted && 'এডিটেড · '}{hhmm(m.ts)}{m.mine && !m.deleted && <Tick s={m.status} />}
               </p>
+              {m.mine && !m.deleted && m.status === 'failed' && (
+                <button onClick={() => void act.retry(m)} className="block ml-auto text-xs underline text-red-200">আবার পাঠান</button>
+              )}
             </div>
             {m.reactions && Object.keys(m.reactions).length > 0 && (
               <div className="-mt-2 mx-2 px-1.5 rounded-full bg-slate-800 border border-slate-600 text-xs w-fit">
@@ -1005,7 +1114,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
           <div className="flex-1 min-w-0 border-l-4 border-emerald-500 pl-2">
             <p className="text-xs text-emerald-400 flex items-center gap-1">
               <Icon name={editing ? 'edit' : 'reply'} className="size-3.5" />
-              {editing ? 'মেসেজ এডিট করছেন' : 'উত্তর: ' + (replyTo!.mine ? 'আপনি' : prof?.fullName || '@' + peer)}
+              {editing ? 'মেসেজ এডিট করছেন' : <>{'উত্তর: '}{replyTo!.mine ? 'আপনি' : prof?.fullName ? raw(prof.fullName) : '@' + peer}</>}
             </p>
             <p className="text-sm text-slate-300 truncate">{previewText((editing ?? replyTo)!)}</p>
           </div>
@@ -1032,7 +1141,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
             className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="image" /></button>
           <button onClick={() => fileRef.current?.click()} disabled={sending} title="ফাইল"
             className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="clip" /></button>
-          <input value={text} onChange={e => setText(e.target.value)}
+          <input value={text} onChange={e => setText(e.target.value)} maxLength={5000}
             onKeyDown={e => e.key === 'Enter' && submit()} placeholder="মেসেজ লিখুন"
             className="flex-1 min-w-0 rounded-full bg-slate-800 px-4 py-3 outline-none focus:ring-2 ring-emerald-500" />
           {text.trim()
@@ -1065,11 +1174,13 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   )
 }
 
-function PeerProfilePage({ peer, session, onBack, onDelete }: {
-  peer: string; session: Session; onBack: () => void; onDelete: () => void
+function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
+  peer: string; session: Session; onBack: () => void; onDelete: () => void; onChat?: () => void
 }) {
   const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
-  const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string; publicKey?: string | null } | null>(null)
+  const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string; publicKey?: string | null
+    gender?: string | null; birthDate?: string | null; hasCover?: boolean } | null>(null)
+  const [cover, setCover] = useState<string | null>(null)
   const [verified, setVerified] = useState(false)
   const [safety, setSafety] = useState(false)
   const [confirm, setConfirm] = useState(false)
@@ -1079,22 +1190,37 @@ function PeerProfilePage({ peer, session, onBack, onDelete }: {
       setU(r)
       const v = localStorage.getItem(vk)
       setVerified(!!v && v === r.publicKey)
+      if (r.hasCover) call('/api/cover/' + encodeURIComponent(peer), 'GET', undefined, session.token)
+        .then(c => setCover(c.cover ?? null)).catch(() => {})
     }).catch(() => setU({}))
   }, [peer])
-  const name = u?.fullName || peer
+  const name = u?.fullName ? raw(u.fullName) : peer
   return (
     <PageShell title="প্রোফাইল" onBack={onBack}>
-      <div className="flex flex-col items-center gap-1 pt-2">
+      <div className="h-36 rounded-xl overflow-hidden bg-gradient-to-r from-emerald-800 to-slate-700">
+        {cover && <img src={cover} alt="" className="size-full object-cover" />}
+      </div>
+      <div className="flex flex-col items-center gap-1 -mt-14 relative">
         {u?.avatar
-          ? <button onClick={() => setView(true)}><img src={u.avatar} alt="" className="size-28 rounded-full object-cover" /></button>
-          : <div className="size-28 rounded-full bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
+          ? <button onClick={() => setView(true)}><img src={u.avatar} alt="" className="size-28 rounded-full object-cover ring-4 ring-slate-900" /></button>
+          : <div className="size-28 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
         <p className="text-xl font-semibold break-words text-center mt-2">{name}</p>
         <p className="text-sm text-slate-400">@{peer}</p>
+        <PresenceLine peer={peer} token={session.token} />
       </div>
       {view && u?.avatar && <Lightbox src={u.avatar} onClose={() => setView(false)} />}
       <Card title="Bio">
-        <p className="break-words whitespace-pre-wrap">{u === null ? '…' : u.bio || 'কোনো bio নেই'}</p>
+        <p className="break-words whitespace-pre-wrap">{u === null ? '…' : u.bio ? raw(u.bio) : 'কোনো bio নেই'}</p>
       </Card>
+      {onChat && (
+        <button onClick={onChat} className="w-full rounded-xl bg-emerald-600 py-3 font-semibold">মেসেজ করুন</button>
+      )}
+      {u && (u.gender || u.birthDate) && (
+        <Card title="ব্যক্তিগত তথ্য">
+          {u.gender && <p className="flex justify-between"><span className="text-slate-400">লিঙ্গ</span><span>{genderLabel(u.gender)}</span></p>}
+          {u.birthDate && <p className="flex justify-between"><span className="text-slate-400">জন্ম তারিখ</span><span>{fmtBirth(u.birthDate)}</span></p>}
+        </Card>
+      )}
       <Card title="নিরাপত্তা">
         <p className="text-sm text-slate-300 flex items-center gap-2">
           <Icon name={verified ? 'shield' : 'lock'} className="size-4 text-emerald-400 shrink-0" />

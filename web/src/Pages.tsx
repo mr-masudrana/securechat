@@ -2,8 +2,9 @@ import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import Icon from './Icon'
 import { call } from './api'
+import { resizeCover } from './media'
 import { fingerprint, type Identity } from './crypto'
-import { getLangPref, locale, setLangPref, type Lang } from './i18n'
+import { getLangPref, locale, raw, setLangPref, type Lang } from './i18n'
 import { setReadReceipts, readReceiptsOn, setSound, soundOn } from './notify'
 import { disablePush, enablePush, pushState, type PushState } from './push'
 import { getThemePref, setThemePref, type Theme } from './theme'
@@ -124,15 +125,16 @@ function Choice<T extends string>({ value, options, onChange }: { value: T; opti
 
 // ---------- অ্যাকাউন্ট পেজ ----------
 const GENDERS: [string, string][] = [['', 'বলতে চাই না'], ['male', 'পুরুষ'], ['female', 'নারী'], ['other', 'অন্যান্য']]
-const genderLabel = (g: string) => GENDERS.find(x => x[0] === g)?.[1] ?? 'বলতে চাই না'
-const fmtBirth = (d: string) => {
+export const genderLabel = (g: string) => GENDERS.find(x => x[0] === g)?.[1] ?? 'বলতে চাই না'
+export const fmtBirth = (d: string) => {
   const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/)
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' }) : '—'
 }
 const today = () => new Date().toISOString().slice(0, 10)
 
-export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, onBack }: {
+export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch, onUsername, onBack }: {
   session: Session; avatar: string | null; onAvatar: (e: ChangeEvent<HTMLInputElement>) => void
+  onRemoveAvatar: () => void
   onPatch: (p: Partial<Session>) => void; onUsername: (name: string, current: string) => Promise<void>; onBack: () => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -140,7 +142,27 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
   const [ok, setOk] = useState('')
   const [uname, setUname] = useState(false)
   const [view, setView] = useState(false)
+  const [cover, setCover] = useState<string | null>(null)
   const { busy, err, setErr, run } = useRun()
+  useEffect(() => {
+    if (!session.hasCover) { setCover(null); return }
+    call('/api/cover/' + encodeURIComponent(session.username), 'GET', undefined, session.token)
+      .then(r => setCover(r.cover ?? null)).catch(() => {})
+  }, [session.hasCover])
+  const pickCover = (e: ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    void run(async () => {
+      const c = await resizeCover(f)
+      await call('/api/profile/cover', 'POST', { cover: c }, session.token)
+      setCover(c); onPatch({ hasCover: true }); setOk('কভার ফটো বদলেছে')
+    })
+  }
+  const removeCover = () => run(async () => {
+    await call('/api/profile/cover', 'POST', { cover: '' }, session.token)
+    setCover(null); onPatch({ hasCover: false }); setOk('কভার ফটো সরানো হয়েছে')
+  })
 
   const start = () => {
     setD({ name: session.fullName, bio: session.bio, gender: session.gender, birth: session.birthDate })
@@ -164,12 +186,24 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
     </button>
   )
   const pic = avatar
-    ? <img src={avatar} alt="" className="size-28 rounded-full object-cover" />
-    : <div className="size-28 rounded-full bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{session.username[0]}</div>
+    ? <img src={avatar} alt="" className="size-28 rounded-full object-cover ring-4 ring-slate-900" />
+    : <div className="size-28 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{session.username[0]}</div>
 
   return (
     <PageShell title="অ্যাকাউন্ট" onBack={onBack} right={right}>
-      <div className="flex flex-col items-center gap-1 pt-2">
+      <div className="relative h-36 rounded-xl overflow-hidden bg-gradient-to-r from-emerald-800 to-slate-700">
+        {cover && <img src={cover} alt="" className="size-full object-cover" />}
+        {editing && (
+          <div className="absolute bottom-2 right-2 flex gap-2">
+            {cover && <button onClick={removeCover} disabled={busy} className="rounded-lg bg-black/60 px-3 py-1.5 text-sm text-red-300 disabled:opacity-50">সরান</button>}
+            <label className="rounded-lg bg-black/60 px-3 py-1.5 text-sm cursor-pointer flex items-center gap-1">
+              <Icon name="camera" className="size-4" /> কভার ফটো
+              <input type="file" accept="image/*" className="hidden" onChange={pickCover} />
+            </label>
+          </div>
+        )}
+      </div>
+      <div className="flex flex-col items-center gap-1 -mt-14 relative">
         {editing ? (
           <label className="relative cursor-pointer">
             {pic}
@@ -179,9 +213,12 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
             <input type="file" accept="image/*" className="hidden" onChange={onAvatar} />
           </label>
         ) : avatar ? <button onClick={() => setView(true)}>{pic}</button> : pic}
+        {editing && avatar && (
+          <button onClick={onRemoveAvatar} className="text-sm text-red-400 pt-1">ছবি সরান</button>
+        )}
         {!editing && (
           <>
-            <p className="text-xl font-semibold pt-2">{session.fullName}</p>
+            <p className="text-xl font-semibold pt-2">{raw(session.fullName)}</p>
             <p className="text-sm text-slate-400">@{session.username}</p>
           </>
         )}
@@ -191,9 +228,9 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
 
       {!editing ? (
         <Card>
-          <Row label="নাম" value={session.fullName} />
+          <Row label="নাম" value={raw(session.fullName)} />
           <Row label="Username" value={'@' + session.username} />
-          <Row label="Bio" value={session.bio || '—'} />
+          <Row label="Bio" value={session.bio ? raw(session.bio) : '—'} />
           <Row label="লিঙ্গ" value={genderLabel(session.gender)} />
           <Row label="জন্ম তারিখ" value={fmtBirth(session.birthDate)} />
         </Card>
@@ -223,7 +260,7 @@ export function AccountPage({ session, avatar, onAvatar, onPatch, onUsername, on
           <Err msg={err} />
         </Card>
       )}
-      <p className="text-xs text-slate-500 text-center">Bio, লিঙ্গ ও জন্ম তারিখ শুধু আপনি দেখতে পারেন। ইমেইল ও পাসওয়ার্ড প্রাইভেসি পেজে বদলানো যায়।</p>
+      <p className="text-xs text-slate-500 text-center">লিঙ্গ, জন্ম তারিখ ও অনলাইন স্ট্যাটাস কে দেখবে তা প্রাইভেসি পেজে ঠিক করুন। ইমেইল ও পাসওয়ার্ডও সেখানে বদলানো যায়।</p>
       {uname && <UsernameSheet onSubmit={onUsername} onClose={() => setUname(false)} />}
     </PageShell>
   )
@@ -301,10 +338,13 @@ function PasswordForm({ token, onDone }: { token: string; onDone: () => void }) 
   )
 }
 
-export function PrivacyPage({ session, identity, onPatch, onClearAll, onBack }: {
+export function PrivacyPage({ session, identity, onPatch, onClearAll, onDeleteAccount, onBack }: {
   session: Session; identity: Identity; onPatch: (p: Partial<Session>) => void
-  onClearAll: () => Promise<void>; onBack: () => void
+  onClearAll: () => Promise<void>; onDeleteAccount: (pw: string) => Promise<void>; onBack: () => void
 }) {
+  const [delOpen, setDelOpen] = useState(false)
+  const [delPw, setDelPw] = useState('')
+  const del = useRun()
   const [open, setOpen] = useState<'email' | 'password' | null>(null)
   const [ok, setOk] = useState('')
   const [rr, setRr] = useState(readReceiptsOn())
@@ -330,6 +370,7 @@ export function PrivacyPage({ session, identity, onPatch, onClearAll, onBack }: 
         </button>
         {open === 'password' && <PasswordForm token={session.token} onDone={() => { setOpen(null); setOk('পাসওয়ার্ড বদলেছে, অন্য ডিভাইস লগআউট হয়ে গেছে') }} />}
       </Card>
+      <VisibilityCard session={session} onPatch={onPatch} />
       <Card title="চ্যাট প্রাইভেসি">
         <div className="flex items-center justify-between gap-3 text-sm">
           <span>
@@ -361,7 +402,51 @@ export function PrivacyPage({ session, identity, onPatch, onClearAll, onBack }: 
           </div>
         )}
       </Card>
+      <Card title="অ্যাকাউন্ট ডিলিট">
+        {!delOpen ? (
+          <button onClick={() => setDelOpen(true)} className="w-full rounded-lg bg-slate-700 py-3 text-red-400">অ্যাকাউন্ট চিরতরে মুছুন</button>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-red-400">অ্যাকাউন্ট, প্রোফাইল ও জমা থাকা মেসেজ সার্ভার থেকে মুছে যাবে এবং এই ডিভাইসের সব চ্যাট ও কী মুছবে। এটা ফেরানো যাবে না। আপনার username ৩০ দিন অন্য কেউ নিতে পারবে না।</p>
+            <Inp type="password" value={delPw} onChange={e => setDelPw(e.target.value)} placeholder="বর্তমান পাসওয়ার্ড" autoComplete="current-password" />
+            <Err msg={del.err} />
+            <button disabled={del.busy || !delPw} onClick={() => del.run(async () => { await onDeleteAccount(delPw) })}
+              className="w-full rounded-lg bg-red-700 py-3 font-semibold disabled:opacity-50">{del.busy ? 'অপেক্ষা করুন...' : 'হ্যাঁ, অ্যাকাউন্ট মুছুন'}</button>
+            <button onClick={() => { setDelOpen(false); setDelPw('') }} className="w-full text-sm text-slate-400">বাতিল</button>
+          </div>
+        )}
+      </Card>
     </PageShell>
+  )
+}
+
+// ---------- কে কী দেখতে পারবে ----------
+const VIS_OPTS: ['all' | 'contacts' | 'me', string][] = [['all', 'সবাই'], ['contacts', 'যাদের সঙ্গে চ্যাট করেছি'], ['me', 'শুধু আমি']]
+function VisibilityCard({ session, onPatch }: { session: Session; onPatch: (p: Partial<Session>) => void }) {
+  const [v, setV] = useState({ genderVis: session.genderVis, birthVis: session.birthVis, onlineVis: session.onlineVis })
+  const [msg, setMsg] = useState('')
+  const { err, run } = useRun()
+  const change = (k: keyof typeof v, val: string) => {
+    const next = { ...v, [k]: val }
+    setV(next); setMsg('')
+    void run(async () => {
+      await call('/api/account/privacy', 'POST', next, session.token)
+      onPatch(next); setMsg('সেটিং সেভ হয়েছে')
+    })
+  }
+  const groups: [keyof typeof v, string][] = [['genderVis', 'কে আমার লিঙ্গ দেখতে পারবে'], ['birthVis', 'কে আমার জন্ম তারিখ দেখতে পারবে'], ['onlineVis', 'কে আমার অনলাইন স্ট্যাটাস দেখতে পারবে']]
+  return (
+    <Card title="প্রোফাইলের দৃশ্যমানতা">
+      {groups.map(([k, label]) => (
+        <div key={k} className="space-y-1">
+          <p className="text-sm text-slate-300">{label}</p>
+          <Choice value={v[k] as 'all' | 'contacts' | 'me'} options={VIS_OPTS} onChange={val => change(k, val)} />
+        </div>
+      ))}
+      <p className="text-xs text-slate-500">"চ্যাট করেছি" মানে যাদের সঙ্গে আপনার মেসেজ আদান-প্রদান হয়েছে। নাম, ছবি, কভার ও bio সবসময় লগইন করা সবাই দেখতে পারে।</p>
+      <Err msg={err} />
+      {msg && <p className="text-sm text-emerald-400">{msg}</p>}
+    </Card>
   )
 }
 

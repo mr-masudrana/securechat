@@ -1,4 +1,5 @@
 import type { StoredMsg } from './crypto'
+import { raw } from './i18n'
 
 const SAFE_IMG = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 export const isImg = (m: string) => SAFE_IMG.includes(m)
@@ -12,7 +13,7 @@ export const fmtSize = (n: number) =>
   n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB'
 
 export const previewText = (m: StoredMsg) =>
-  m.deleted ? 'মুছে ফেলা মেসেজ' : m.text || (m.file ? (isAudio(m.file.m) ? 'ভয়েস মেসেজ' : isImg(m.file.m) ? 'ছবি' : m.file.n) : '')
+  m.deleted ? 'মুছে ফেলা মেসেজ' : m.text ? raw(m.text) : (m.file ? (isAudio(m.file.m) ? 'ভয়েস মেসেজ' : isImg(m.file.m) ? 'ছবি' : raw(m.file.n)) : '')
 
 export async function makeThumb(file: File): Promise<string | undefined> {
   if (!isImg(file.type)) return
@@ -71,4 +72,24 @@ export async function prepareImage(file: File): Promise<File> {
   } catch {
     return file
   }
+}
+
+// কভার ফটো: মাঝখান থেকে ৫:২ অনুপাতে কেটে ১০০০×৪০০ JPEG; সার্ভারের সীমার (~১২০ KB) ভেতরে আনতে মান কমানো হয়
+export async function resizeCover(file: File): Promise<string> {
+  const bmp = await createImageBitmap(file)
+  const W = 1000, H = 400
+  const c = document.createElement('canvas')
+  c.width = W; c.height = H
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, W, H)
+  const k = Math.max(W / bmp.width, H / bmp.height)
+  const w = bmp.width * k, h = bmp.height * k
+  ctx.drawImage(bmp, (W - w) / 2, (H - h) / 2, w, h)
+  bmp.close()
+  for (const q of [0.75, 0.6, 0.45, 0.3]) {
+    const url = c.toDataURL('image/jpeg', q)
+    if (url.length < 150_000) return url
+  }
+  throw new Error('ছবিটা অনেক বড়, অন্য একটা ছবি বেছে নিন')
 }

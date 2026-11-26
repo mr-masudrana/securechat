@@ -92,7 +92,8 @@ export async function fingerprint(pubB64: string) {
 
 export async function lookupUser(peer: string, token: string) {
   const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
-    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string }
+    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string
+      gender?: string | null; birthDate?: string | null; hasCover?: boolean }
   // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
   if (u.publicKey) {
     const n = u.username.toLowerCase()
@@ -140,10 +141,16 @@ async function sharedKey(id: Identity, peer: string, token: string): Promise<Sha
   return v
 }
 
+// পিয়ারের কী ক্যাশ ভুলে যাওয়া (ডিক্রিপ্ট ব্যর্থ হলে নতুন কী এনে আবার চেষ্টা করার জন্য)
+export const forgetKey = (peer: string) => { cache.delete(peer.toLowerCase()) }
+
 const aad = (from: string, to: string) => enc.encode(`${from.toLowerCase()}>${to.toLowerCase()}`)
 
 export async function encryptBody(id: Identity, me: string, peer: string, token: string, body: Body) {
   const { key, username } = await sharedKey(id, peer, token)
+  // কী বদলে গেলে (এবং এখনো মেনে নেওয়া না হলে) সাধারণ মেসেজ/ফাইল পাঠানো বন্ধ; রিসিপ্ট ও কন্ট্রোল মেসেজ চলে
+  if ((body.t !== undefined || body.f) && pinChanged(username))
+    throw new Error(`@${username}-এর নিরাপত্তা কী বদলেছে। চ্যাটের উপরের নোটিশ থেকে সেফটি নাম্বার মিলিয়ে "বুঝেছি, নতুন কী মেনে নিলাম" চাপুন`)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ct = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: aad(me, username) },
@@ -248,14 +255,25 @@ export async function loadMessages(owner: string) {
 }
 
 // আইডেন্টিটি এখন ইউজার id দিয়ে রাখা হয়। আগের (username দিয়ে রাখা) কী থাকলে সেটাই নেওয়া হয়
-export async function ensureIdentity(id: string, username: string, token: string) {
+// takeover: সরাসরি লগইনের সময় true। তখন এই ডিভাইসের কী-ই সার্ভারে বসে (অন্য ডিভাইস পুরনো হয়ে যায়)।
+// পেজ রিফ্রেশে false: সার্ভারের কী আলাদা হলে চুপচাপ কেড়ে না নিয়ে Messenger সতর্কতা দেখায়।
+export async function ensureIdentity(id: string, username: string, token: string,
+  serverKey: string | null = null, takeover = false) {
   let ident = (await loadIdentity(id)) ?? (username ? await loadIdentity(username) : undefined)
   if (!ident) {
     ident = await generateIdentity()
     await call('/api/key', 'PUT', { publicKey: ident.publicKeyB64 }, token)
+  } else if (takeover && serverKey !== ident.publicKeyB64) {
+    await call('/api/key', 'PUT', { publicKey: ident.publicKeyB64 }, token)
   }
   await saveIdentity(id, ident)
   return ident
+}
+
+// অ্যাকাউন্ট ডিলিটের পর এই ডিভাইসের কী মুছে ফেলা
+export async function deleteIdentity(id: string, username: string) {
+  await idb(KEYS, 'readwrite', s => s.delete('identity:' + id.toLowerCase()))
+  await idb(KEYS, 'readwrite', s => s.delete('identity:' + username.toLowerCase()))
 }
 
 // একই ট্রানজাকশনে পড়ে-বদলে-লেখা (রিঅ্যাকশন, এডিট ইত্যাদি একসঙ্গে এলেও কিছু হারায় না)

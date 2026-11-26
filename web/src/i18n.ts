@@ -21,7 +21,11 @@ try { // নোটিফিকেশনের ভাষার জন্য (স�
 
 // বাংলা লেখাই কী; ইংরেজি হলে অভিধান থেকে অনুবাদ, না পেলে আগের লেখাই থাকে
 const cache = new Map<string, string>()
+// ইউজারের লেখা (মেসেজ, নাম, bio, ফাইলের নাম) অনুবাদ থেকে বাঁচাতে: অদৃশ্য চিহ্ন বসে, t() সেটা দেখে ছেড়ে দেয়
+const RAW = '\u2060'
+export const raw = (s: string) => (LANG === 'bn' || !s ? s : s + RAW)
 export function t(s: string): string {
+  if (typeof s === 'string' && s.endsWith(RAW)) return s.slice(0, -1)
   if (LANG === 'bn' || typeof s !== 'string' || !/[\u0980-\u09FF]/.test(s)) return s
   const hit = cache.get(s)
   if (hit !== undefined) return hit

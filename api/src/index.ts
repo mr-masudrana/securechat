@@ -89,6 +89,9 @@ const meOf = (u: any) => ({
   id: u.id, username: u.profile_done ? u.username : '', fullName: u.full_name || u.username,
   email: u.email ?? null, avatar: u.avatar ?? null, needsProfile: !u.profile_done,
   bio: u.bio ?? '', gender: u.gender ?? '', birthDate: u.birth_date ?? '',
+  genderVis: u.gender_vis ?? 'me', birthVis: u.birth_vis ?? 'me', onlineVis: u.online_vis ?? 'all',
+  hasCover: !!u.cover,
+  publicKey: u.public_key ?? null, // ক্লায়েন্ট দেখে নেয় এই ডিভাইসের কী-ই সার্ভারে আছে কিনা
 })
 
 // Brevo (ফ্রি, কার্ড লাগে না) দিয়ে ইমেইল পাঠানো
@@ -106,6 +109,14 @@ async function sendMail(env: Env, to: string, subject: string, text: string) {
     }),
   })
   if (!r.ok) { console.error('brevo', r.status, await r.text()); throw new Error('mail: failed') }
+}
+
+// দৃশ্যমানতা: 'all' সবাই, 'contacts' যাদের সঙ্গে মেসেজ আদান-প্রদান হয়েছে, 'me' শুধু মালিক
+const VIS = ['all', 'contacts', 'me']
+async function canSee(env: Env, vis: string, viewerId: string, ownerId: string) {
+  if (viewerId === ownerId || vis === 'all') return true
+  if (vis !== 'contacts') return false
+  return !!(await env.DB.prepare('SELECT 1 FROM contacts WHERE a = ? AND b = ?').bind(ownerId, viewerId).first())
 }
 
 type Purpose = 'signup' | 'reset' | 'email'
@@ -218,8 +229,12 @@ export default {
           return json({ error: 'Password ৮ থেকে ২০০ অক্ষরের হতে হবে' }, 400)
         if (await limited(env, `reg:${ip}`, 10, 3600) || await limited(env, `otp:${email}`, 5, 3600))
           return json(tooMany, 429)
-        if (await env.DB.prepare('SELECT 1 FROM users WHERE email = ?').bind(email).first())
-          return json({ error: 'এই ইমেইল দিয়ে আগেই অ্যাকাউন্ট আছে, লগইন করুন' }, 409)
+        if (await env.DB.prepare('SELECT 1 FROM users WHERE email = ?').bind(email).first()) {
+          // অ্যাকাউন্ট আছে কিনা রেসপন্সে জানাই না (forgot-এর মতো); আসল মালিককে ইমেইলে জানাই
+          await sendMail(env, email, 'SecureChat: এই ইমেইলে অ্যাকাউন্ট আছে',
+            'কেউ এই ইমেইল দিয়ে নতুন SecureChat অ্যাকাউন্ট খুলতে চেয়েছিল, কিন্তু এই ইমেইলে আগেই অ্যাকাউন্ট আছে।\nআপনি হলে লগইন করুন (পাসওয়ার্ড ভুলে গেলে "পাসওয়ার্ড ভুলে গেছেন?" ব্যবহার করুন)। আপনি না হলে এই ইমেইল উপেক্ষা করুন।')
+          return json({ ok: true })
+        }
         const salt = crypto.getRandomValues(new Uint8Array(16))
         await issueOtp(env, email, 'signup',
           { full_name: fullName, pass_hash: await hashPw(password, salt), salt: b64(salt) }, true)
@@ -326,6 +341,7 @@ export default {
         const user = await authUser(req, env)
         if (!user) return json({ error: 'Unauthorized' }, 401)
         if (!user.profile_done) return json({ error: 'আগে প্রোফাইল সম্পূর্ণ করুন' }, 403)
+        if (await limited(env, `wst:${user.id}`, 60, 60)) return json(tooMany, 429)
         const ticket = b64(crypto.getRandomValues(new Uint8Array(24))).replace(/[^a-zA-Z0-9]/g, '')
         await env.DB.prepare('INSERT INTO ws_tickets VALUES (?, ?, ?)')
           .bind(await sha256(ticket), user.id, Date.now() + 30_000).run()
@@ -348,6 +364,7 @@ export default {
         if (!user) return json({ error: 'Unauthorized' }, 401)
         const headers = new Headers(req.headers)
         headers.set('X-Username', user.username)
+        headers.set('X-Uid', user.id)
         return env.INBOX.get(env.INBOX.idFromName(user.id)).fetch(new Request(req, { headers }))
       }
 
@@ -364,7 +381,8 @@ export default {
         if (!user) return json({ error: 'Unauthorized' }, 401)
         if (await limited(env, `prof:${user.id}`, 30, 3600)) return json(tooMany, 429)
         const { username, avatar } = await readJson(req)
-        const hasAvatar = typeof avatar === 'string'
+        const clearAvatar = avatar === '' // খালি স্ট্রিং = ছবি সরাও
+        const hasAvatar = typeof avatar === 'string' && !clearAvatar
         if (hasAvatar && (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(avatar) || avatar.length > 80_000))
           return json({ error: 'ছবি ঠিক নেই' }, 400)
         if (!user.profile_done) {
@@ -381,6 +399,8 @@ export default {
           }
         } else if (hasAvatar) {
           await env.DB.prepare('UPDATE users SET avatar = ? WHERE id = ?').bind(avatar, user.id).run()
+        } else if (clearAvatar) {
+          await env.DB.prepare('UPDATE users SET avatar = NULL WHERE id = ?').bind(user.id).run()
         }
         const u = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<any>()
         return json(meOf(u))
@@ -404,11 +424,57 @@ export default {
         let name: string
         try { name = decodeURIComponent(pathname.slice('/api/users/'.length)) } catch { return json({ error: 'Not found' }, 404) }
         const u = await env.DB.prepare(
-          'SELECT username, full_name, avatar, public_key, bio FROM users WHERE username = ? AND profile_done = 1')
+          `SELECT id, username, full_name, avatar, public_key, bio, gender, birth_date, gender_vis, birth_vis,
+                  (cover IS NOT NULL AND cover != '') AS has_cover
+           FROM users WHERE username = ? AND profile_done = 1`)
           .bind(name).first<any>()
-        return u
-          ? json({ username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key, bio: u.bio || '' })
-          : json({ error: 'Not found' }, 404)
+        if (!u) return json({ error: 'Not found' }, 404)
+        // লিঙ্গ ও জন্ম তারিখ শুধু মালিকের ঠিক করা দর্শকদের কাছে যায়; না হলে null
+        const [g, b] = await Promise.all([canSee(env, u.gender_vis, me.id, u.id), canSee(env, u.birth_vis, me.id, u.id)])
+        return json({
+          username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key,
+          bio: u.bio || '', hasCover: !!u.has_cover,
+          gender: g ? (u.gender || '') : null, birthDate: b ? (u.birth_date || '') : null,
+        })
+      }
+
+      // কভার ফটো আলাদা রুটে: প্রতিটি lookup-এ বড় ছবি যাতে না যায়
+      if (pathname.startsWith('/api/cover/') && req.method === 'GET') {
+        const me = await authUser(req, env)
+        if (!me) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `cover:${me.id}`, 60, 60)) return json(tooMany, 429)
+        let name: string
+        try { name = decodeURIComponent(pathname.slice('/api/cover/'.length)) } catch { return json({ error: 'Not found' }, 404) }
+        const u = await env.DB.prepare('SELECT cover FROM users WHERE username = ? AND profile_done = 1').bind(name).first<{ cover: string | null }>()
+        return json({ cover: u?.cover || null })
+      }
+
+      if (pathname === '/api/profile/cover' && req.method === 'POST') {
+        const user = await authUser(req, env)
+        if (!user || !user.profile_done) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `prof:${user.id}`, 30, 3600)) return json(tooMany, 429)
+        const { cover } = await readJson(req)
+        if (cover === '' || cover === null) {
+          await env.DB.prepare('UPDATE users SET cover = NULL WHERE id = ?').bind(user.id).run()
+          return json({ ok: true, hasCover: false })
+        }
+        if (typeof cover !== 'string' || !/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(cover) || cover.length > 160_000)
+          return json({ error: 'কভার ছবি ঠিক নেই' }, 400)
+        await env.DB.prepare('UPDATE users SET cover = ? WHERE id = ?').bind(cover, user.id).run()
+        return json({ ok: true, hasCover: true })
+      }
+
+      // অনলাইন স্ট্যাটাস: মালিকের সেটিং মানা হয়
+      if (pathname.startsWith('/api/presence/') && req.method === 'GET') {
+        const me = await authUser(req, env)
+        if (!me) return json({ error: 'Unauthorized' }, 401)
+        if (await limited(env, `presence:${me.id}`, 90, 60)) return json(tooMany, 429)
+        let name: string
+        try { name = decodeURIComponent(pathname.slice('/api/presence/'.length)) } catch { return json({ visible: false }) }
+        const u = await env.DB.prepare('SELECT id, online_vis FROM users WHERE username = ? AND profile_done = 1').bind(name).first<any>()
+        if (!u || !(await canSee(env, u.online_vis, me.id, u.id))) return json({ visible: false })
+        const r = await env.INBOX.get(env.INBOX.idFromName(u.id)).fetch('https://inbox/presence')
+        return json({ visible: true, ...(await r.json<any>()) })
       }
 
       // ---- অ্যাকাউন্ট বদল: নাম, পাসওয়ার্ড, ইমেইল (কোড দিয়ে), username ----
@@ -430,6 +496,14 @@ export default {
           if (fullName.length < 2 || fullName.length > 60) return json({ error: 'পুরো নাম ২-৬০ অক্ষরের হতে হবে' }, 400)
           await env.DB.prepare('UPDATE users SET full_name = ? WHERE id = ?').bind(fullName, user.id).run()
           return json({ ok: true, fullName })
+        }
+
+        if (what === 'privacy') {
+          const { genderVis, birthVis, onlineVis } = b
+          if (![genderVis, birthVis, onlineVis].every(v => VIS.includes(v))) return json({ error: 'সেটিং ঠিক নেই' }, 400)
+          await env.DB.prepare('UPDATE users SET gender_vis = ?, birth_vis = ?, online_vis = ? WHERE id = ?')
+            .bind(genderVis, birthVis, onlineVis, user.id).run()
+          return json({ ok: true, genderVis, birthVis, onlineVis })
         }
 
         if (what === 'profile') {
@@ -497,6 +571,27 @@ export default {
             } catch { /* সতর্কবার্তা না গেলেও বদল বৈধ */ }
           }
           return json({ ok: true, email })
+        }
+
+        if (what === 'delete') {
+          const bad = await needPw()
+          if (bad) return bad
+          const now = Date.now()
+          await env.DB.batch([
+            env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(user.id),
+            env.DB.prepare('DELETE FROM ws_tickets WHERE user_id = ?').bind(user.id),
+            env.DB.prepare('DELETE FROM push_subs WHERE user_id = ?').bind(user.id),
+            env.DB.prepare('DELETE FROM otps WHERE email = ?').bind(row.email ?? ''),
+            env.DB.prepare('DELETE FROM config WHERE key = ?').bind('uname:' + user.id),
+            env.DB.prepare('DELETE FROM username_holds WHERE user_id = ?').bind(user.id),
+            // মুছে ফেলা username ৩০ দিন কেউ নিতে পারবে না (কন্টাক্টদের কাছে ভুয়া ব্যক্তি ঠেকাতে)
+            env.DB.prepare('INSERT OR REPLACE INTO username_holds (username, user_id, until) VALUES (?, ?, ?)')
+              .bind(row.username, user.id, now + 30 * 86400_000),
+            env.DB.prepare('DELETE FROM contacts WHERE a = ? OR b = ?').bind(user.id, user.id),
+            env.DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
+          ])
+          try { await env.INBOX.get(env.INBOX.idFromName(user.id)).fetch('https://inbox/purge', { method: 'POST' }) } catch { /* ইনবক্স ফাঁকা থাকলেও ক্ষতি নেই */ }
+          return json({ ok: true })
         }
 
         if (what === 'username') {
@@ -570,7 +665,7 @@ export default {
         if (!user) return json({ error: 'Unauthorized' }, 401)
         if (await limited(env, `media:${user.id}`, 60, 60)) return json(tooMany, 429)
         const to = new URL(req.url).searchParams.get('to') || ''
-        const rcpt = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        const rcpt = await env.DB.prepare('SELECT id FROM users WHERE username = ? AND profile_done = 1')
           .bind(to).first<{ id: string }>()
         if (!rcpt) return json({ error: 'ইউজার পাওয়া যায়নি' }, 404)
 
@@ -581,6 +676,9 @@ export default {
         if (!body.byteLength) return json({ error: 'ফাইলটা খালি' }, 400)
         if (body.byteLength > MAX_UPLOAD) return json({ error: 'ফাইল সর্বোচ্চ ২০ MB হতে পারবে' }, 413)
 
+        // KV-র ফ্রি লেখার সীমা (দিনে ~১০০০) একজনে শেষ করে দিতে না পারে
+        if (await limited(env, `mediaday:${user.id}`, 150, 86400))
+          return json({ error: 'আজকের আপলোড সীমা শেষ, কাল আবার চেষ্টা করুন' }, 429)
         const id = crypto.randomUUID()
         try {
           await env.MEDIA.put(id, body, {
@@ -640,6 +738,7 @@ export default {
 export class Inbox extends DurableObject<Env> {
   private hits = new Map<WebSocket, number[]>()
   private lastPush = 0
+  private known = new Set<string>() // যাদের সঙ্গে 'কন্টাক্ট' ইতিমধ্যে লেখা হয়েছে (বারবার D1 লেখা এড়াতে)
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -676,9 +775,26 @@ export class Inbox extends DurableObject<Env> {
       meta.n++
       meta.by[sender] = (meta.by[sender] ?? 0) + 1
       await this.ctx.storage.put({ [msg.k]: msg, meta })
-      for (const ws of this.ctx.getWebSockets())
-        ws.send(JSON.stringify({ type: 'msg', ...msg }))
+      for (const ws of this.ctx.getWebSockets()) {
+        // একটা বন্ধ হয়ে যাওয়া সকেট যেন পুরো ডেলিভারি ব্যর্থ না করে (মেসেজ আগেই সেভ হয়েছে)
+        try { ws.send(JSON.stringify({ type: 'msg', ...msg })) } catch { /* ignore */ }
+      }
       if (!quiet && uid) this.ctx.waitUntil(this.push(uid)) // রিসিপ্টে নোটিফিকেশন নয়
+      return new Response('ok')
+    }
+
+    // অনলাইন: খোলা সকেট আছে কিনা; নইলে সর্বশেষ সকেট বন্ধের সময়
+    if (url.pathname === '/presence') {
+      return Response.json({
+        online: this.ctx.getWebSockets().length > 0,
+        lastSeen: (await this.ctx.storage.get<number>('lastSeen')) ?? null,
+      })
+    }
+
+    // অ্যাকাউন্ট ডিলিটের সময়: সকেট বন্ধ ও জমা থাকা সব মেসেজ মুছে ফেলা
+    if (url.pathname === '/purge') {
+      for (const ws of this.ctx.getWebSockets()) { try { ws.close(1000, 'deleted') } catch { /* ignore */ } }
+      await this.ctx.storage.deleteAll()
       return new Response('ok')
     }
 
@@ -687,7 +803,7 @@ export class Inbox extends DurableObject<Env> {
 
     const [client, server] = Object.values(new WebSocketPair())
     this.ctx.acceptWebSocket(server)
-    server.serializeAttachment({ username: req.headers.get('X-Username') })
+    server.serializeAttachment({ username: req.headers.get('X-Username'), uid: req.headers.get('X-Uid') })
 
     // অফলাইনে জমা থাকা মেসেজ পাঠিয়ে দিন
     const pending = await this.ctx.storage.list<any>({ prefix: 'msg:' })
@@ -713,14 +829,26 @@ export class Inbox extends DurableObject<Env> {
     }
   }
 
+  // শেষ সকেট বন্ধ হলে 'সর্বশেষ দেখা' লিখে রাখি
+  private async markSeen(ws: WebSocket) {
+    if (this.ctx.getWebSockets().some(s => s !== ws)) return
+    await this.ctx.storage.put('lastSeen', Date.now())
+  }
+
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
     this.hits.delete(ws)
+    await this.markSeen(ws).catch(() => {})
     try { ws.close(code, reason) } catch { /* আগেই বন্ধ */ }
+  }
+
+  async webSocketError(ws: WebSocket) {
+    this.hits.delete(ws)
+    await this.markSeen(ws).catch(() => {})
   }
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
     if (typeof raw !== 'string') return
-    const me = ws.deserializeAttachment() as { username: string }
+    const me = ws.deserializeAttachment() as { username: string; uid?: string }
     let d: any
     try { d = JSON.parse(raw) } catch { return }
 
@@ -748,9 +876,20 @@ export class Inbox extends DurableObject<Env> {
         d.id.length > 64 || typeof d.payload !== 'string' || d.payload.length > 100_000
       if (bad) return ws.send(JSON.stringify({ type: 'error', id: d.id, error: 'মেসেজ ঠিক নেই' }))
 
-      const r = await this.env.DB.prepare('SELECT id FROM users WHERE username = ?')
+      const r = await this.env.DB.prepare('SELECT id FROM users WHERE username = ? AND profile_done = 1')
         .bind(d.to).first<{ id: string }>()
       if (!r) return ws.send(JSON.stringify({ type: 'error', id: d.id, error: 'ইউজার পাওয়া যায়নি' }))
+
+      // প্রথমবার মেসেজ পাঠালে দুজনকে একে অপরের 'কন্টাক্ট' হিসেবে রাখি (দৃশ্যমানতা সেটিংয়ের জন্য)
+      if (me.uid && !this.known.has(r.id)) {
+        try {
+          await this.env.DB.batch([
+            this.env.DB.prepare('INSERT OR IGNORE INTO contacts (a, b) VALUES (?, ?)').bind(me.uid, r.id),
+            this.env.DB.prepare('INSERT OR IGNORE INTO contacts (a, b) VALUES (?, ?)').bind(r.id, me.uid),
+          ])
+          this.known.add(r.id)
+        } catch { /* পরের মেসেজে আবার চেষ্টা */ }
+      }
 
       const ts = Date.now()
       const res = await this.env.INBOX.get(this.env.INBOX.idFromName(r.id)).fetch('https://inbox/deliver', {

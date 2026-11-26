@@ -46,7 +46,7 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
       pwCheck()
       await call('/api/register', 'POST', { fullName, email, password })
       setCode(''); setWait(60); setMode('verify')
-      setInfo(`${email.trim()} ঠিকানায় ৬ সংখ্যার কোড পাঠানো হয়েছে`)
+      setInfo(`${email.trim()} ঠিকানায় ৬ সংখ্যার কোড পাঠানো হয়েছে। কোড না এলে হয়তো এই ইমেইলে আগেই অ্যাকাউন্ট আছে, লগইন করুন`)
     } else if (mode === 'verify') {
       const r = await call('/api/verify', 'POST', { email, code })
       onAuth(r.token, r.me)

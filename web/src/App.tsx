@@ -13,16 +13,17 @@ export default function App() {
   const [pending, setPending] = useState<{ token: string; me: Me } | null>(null)
   const [boot, setBoot] = useState<'loading' | 'ready' | 'neterr'>('loading')
 
-  const enter = async (token: string, me: Me) => {
+  const enter = async (token: string, me: Me, fresh = false) => {
     localStorage.setItem('token', token)
     if (me.needsProfile) { setPending({ token, me }); return }
-    const identity = await ensureIdentity(me.id, me.username, token)
+    const identity = await ensureIdentity(me.id, me.username, token, me.publicKey ?? null, fresh)
     setPending(null)
     setSession({ id: me.id, username: me.username, fullName: me.fullName, email: me.email, avatar: me.avatar,
-      bio: me.bio, gender: me.gender, birthDate: me.birthDate, token, identity })
+      bio: me.bio, gender: me.gender, birthDate: me.birthDate,
+      genderVis: me.genderVis, birthVis: me.birthVis, onlineVis: me.onlineVis, hasCover: me.hasCover, token, identity })
   }
   const safeEnter = (tok: string, m: Me) =>
-    enter(tok, m).catch(() => alert(t('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন')))
+    enter(tok, m, true).catch(() => alert(t('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন')))
 
   const start = async () => {
     setBoot('loading')

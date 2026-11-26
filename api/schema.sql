@@ -11,7 +11,11 @@ CREATE TABLE IF NOT EXISTS users (
   profile_done INTEGER NOT NULL DEFAULT 1,
   bio TEXT,
   gender TEXT,
-  birth_date TEXT
+  birth_date TEXT,
+  cover TEXT,
+  gender_vis TEXT NOT NULL DEFAULT 'me',
+  birth_vis TEXT NOT NULL DEFAULT 'me',
+  online_vis TEXT NOT NULL DEFAULT 'all'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE TABLE IF NOT EXISTS sessions (
@@ -55,4 +59,9 @@ CREATE TABLE IF NOT EXISTS username_holds (
   username TEXT PRIMARY KEY COLLATE NOCASE,
   user_id TEXT NOT NULL,
   until INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contacts (
+  a TEXT NOT NULL,
+  b TEXT NOT NULL,
+  PRIMARY KEY (a, b)
 );
