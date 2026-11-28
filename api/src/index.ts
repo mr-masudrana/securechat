@@ -88,8 +88,8 @@ const validEmail = (e: string) => e.length <= 254 && EMAIL_RE.test(e)
 const meOf = (u: any) => ({
   id: u.id, username: u.profile_done ? u.username : '', fullName: u.full_name || u.username,
   email: u.email ?? null, avatar: u.avatar ?? null, needsProfile: !u.profile_done,
-  bio: u.bio ?? '', gender: u.gender ?? '', birthDate: u.birth_date ?? '',
-  genderVis: u.gender_vis ?? 'me', birthVis: u.birth_vis ?? 'me', onlineVis: u.online_vis ?? 'all',
+  bio: u.bio ?? '',
+  onlineVis: u.online_vis ?? 'all',
   hasCover: !!u.cover,
   publicKey: u.public_key ?? null, // ক্লায়েন্ট দেখে নেয় এই ডিভাইসের কী-ই সার্ভারে আছে কিনা
 })
@@ -424,17 +424,14 @@ export default {
         let name: string
         try { name = decodeURIComponent(pathname.slice('/api/users/'.length)) } catch { return json({ error: 'Not found' }, 404) }
         const u = await env.DB.prepare(
-          `SELECT id, username, full_name, avatar, public_key, bio, gender, birth_date, gender_vis, birth_vis,
+          `SELECT username, full_name, avatar, public_key, bio,
                   (cover IS NOT NULL AND cover != '') AS has_cover
            FROM users WHERE username = ? AND profile_done = 1`)
           .bind(name).first<any>()
         if (!u) return json({ error: 'Not found' }, 404)
-        // লিঙ্গ ও জন্ম তারিখ শুধু মালিকের ঠিক করা দর্শকদের কাছে যায়; না হলে null
-        const [g, b] = await Promise.all([canSee(env, u.gender_vis, me.id, u.id), canSee(env, u.birth_vis, me.id, u.id)])
         return json({
           username: u.username, fullName: u.full_name || u.username, avatar: u.avatar, publicKey: u.public_key,
           bio: u.bio || '', hasCover: !!u.has_cover,
-          gender: g ? (u.gender || '') : null, birthDate: b ? (u.birth_date || '') : null,
         })
       }
 
@@ -499,29 +496,19 @@ export default {
         }
 
         if (what === 'privacy') {
-          const { genderVis, birthVis, onlineVis } = b
-          if (![genderVis, birthVis, onlineVis].every(v => VIS.includes(v))) return json({ error: 'সেটিং ঠিক নেই' }, 400)
-          await env.DB.prepare('UPDATE users SET gender_vis = ?, birth_vis = ?, online_vis = ? WHERE id = ?')
-            .bind(genderVis, birthVis, onlineVis, user.id).run()
-          return json({ ok: true, genderVis, birthVis, onlineVis })
+          const { onlineVis } = b
+          if (!VIS.includes(onlineVis)) return json({ error: 'সেটিং ঠিক নেই' }, 400)
+          await env.DB.prepare('UPDATE users SET online_vis = ? WHERE id = ?').bind(onlineVis, user.id).run()
+          return json({ ok: true, onlineVis })
         }
 
         if (what === 'profile') {
           const fullName = String(b.fullName ?? '').trim().replace(/\s+/g, ' ')
           const bio = String(b.bio ?? '').trim()
-          const gender = String(b.gender ?? '')
-          const birth = String(b.birthDate ?? '')
           if (fullName.length < 2 || fullName.length > 60) return json({ error: 'পুরো নাম ২-৬০ অক্ষরের হতে হবে' }, 400)
           if (bio.length > 150) return json({ error: 'Bio সর্বোচ্চ ১৫০ অক্ষরের হতে পারে' }, 400)
-          if (!['', 'male', 'female', 'other'].includes(gender)) return json({ error: 'লিঙ্গ ঠিক নেই' }, 400)
-          if (birth) {
-            const ts = Date.parse(birth + 'T00:00:00Z')
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(birth) || isNaN(ts) || new Date(ts).toISOString().slice(0, 10) !== birth ||
-                ts > Date.now() || ts < Date.parse('1900-01-01T00:00:00Z'))
-              return json({ error: 'জন্ম তারিখ ঠিক নেই' }, 400)
-          }
-          await env.DB.prepare('UPDATE users SET full_name = ?, bio = ?, gender = ?, birth_date = ? WHERE id = ?')
-            .bind(fullName, bio, gender, birth, user.id).run()
+          await env.DB.prepare('UPDATE users SET full_name = ?, bio = ? WHERE id = ?')
+            .bind(fullName, bio, user.id).run()
           const u = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<any>()
           return json(meOf(u))
         }

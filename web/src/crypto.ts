@@ -93,7 +93,7 @@ export async function fingerprint(pubB64: string) {
 export async function lookupUser(peer: string, token: string) {
   const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
     { username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string
-      gender?: string | null; birthDate?: string | null; hasCover?: boolean }
+      hasCover?: boolean }
   // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
   if (u.publicKey) {
     const n = u.username.toLowerCase()

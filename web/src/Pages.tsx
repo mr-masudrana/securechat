@@ -4,7 +4,7 @@ import Icon from './Icon'
 import { call } from './api'
 import { resizeCover } from './media'
 import { fingerprint, type Identity } from './crypto'
-import { getLangPref, locale, raw, setLangPref, type Lang } from './i18n'
+import { getLangPref, raw, setLangPref, type Lang } from './i18n'
 import { setReadReceipts, readReceiptsOn, setSound, soundOn } from './notify'
 import { disablePush, enablePush, pushState, type PushState } from './push'
 import { getThemePref, setThemePref, type Theme } from './theme'
@@ -124,21 +124,14 @@ function Choice<T extends string>({ value, options, onChange }: { value: T; opti
 }
 
 // ---------- অ্যাকাউন্ট পেজ ----------
-const GENDERS: [string, string][] = [['', 'বলতে চাই না'], ['male', 'পুরুষ'], ['female', 'নারী'], ['other', 'অন্যান্য']]
-export const genderLabel = (g: string) => GENDERS.find(x => x[0] === g)?.[1] ?? 'বলতে চাই না'
-export const fmtBirth = (d: string) => {
-  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/)
-  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' }) : '—'
-}
-const today = () => new Date().toISOString().slice(0, 10)
 
-export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch, onUsername, onBack }: {
+export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch, onUsername, onGo, onLogout, onBack }: {
   session: Session; avatar: string | null; onAvatar: (e: ChangeEvent<HTMLInputElement>) => void
-  onRemoveAvatar: () => void
+  onRemoveAvatar: () => void; onGo: (p: 'privacy' | 'settings') => void; onLogout: () => void
   onPatch: (p: Partial<Session>) => void; onUsername: (name: string, current: string) => Promise<void>; onBack: () => void
 }) {
   const [editing, setEditing] = useState(false)
-  const [d, setD] = useState({ name: '', bio: '', gender: '', birth: '' })
+  const [d, setD] = useState({ name: '', bio: '' })
   const [ok, setOk] = useState('')
   const [uname, setUname] = useState(false)
   const [view, setView] = useState(false)
@@ -165,13 +158,13 @@ export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch
   })
 
   const start = () => {
-    setD({ name: session.fullName, bio: session.bio, gender: session.gender, birth: session.birthDate })
+    setD({ name: session.fullName, bio: session.bio })
     setErr(''); setOk(''); setEditing(true)
   }
   const save = () => run(async () => {
     const r = await call('/api/account/profile', 'POST',
-      { fullName: d.name, bio: d.bio, gender: d.gender, birthDate: d.birth }, session.token)
-    onPatch({ fullName: r.fullName, bio: r.bio, gender: r.gender, birthDate: r.birthDate })
+      { fullName: d.name, bio: d.bio }, session.token)
+    onPatch({ fullName: r.fullName, bio: r.bio })
     setEditing(false); setOk('প্রোফাইল আপডেট হয়েছে')
   })
 
@@ -186,8 +179,8 @@ export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch
     </button>
   )
   const pic = avatar
-    ? <img src={avatar} alt="" className="size-28 rounded-full object-cover ring-4 ring-slate-900" />
-    : <div className="size-28 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{session.username[0]}</div>
+    ? <img src={avatar} alt="" className="size-28 shrink-0 rounded-full object-cover ring-4 ring-slate-900" />
+    : <div className="size-28 shrink-0 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{session.username[0]}</div>
 
   return (
     <PageShell title="অ্যাকাউন্ট" onBack={onBack} right={right}>
@@ -203,36 +196,31 @@ export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch
           </div>
         )}
       </div>
-      <div className="flex flex-col items-center gap-1 -mt-14 relative">
+      <div className="flex items-end gap-3 -mt-14 relative px-1">
         {editing ? (
-          <label className="relative cursor-pointer">
+          <label className="relative cursor-pointer shrink-0">
             {pic}
             <span className="absolute bottom-0 right-0 size-9 rounded-full bg-emerald-600 grid place-items-center border-2 border-slate-900 text-white">
               <Icon name="camera" className="size-4" />
             </span>
             <input type="file" accept="image/*" className="hidden" onChange={onAvatar} />
           </label>
-        ) : avatar ? <button onClick={() => setView(true)}>{pic}</button> : pic}
-        {editing && avatar && (
-          <button onClick={onRemoveAvatar} className="text-sm text-red-400 pt-1">ছবি সরান</button>
-        )}
-        {!editing && (
-          <>
-            <p className="text-xl font-semibold pt-2">{raw(session.fullName)}</p>
-            <p className="text-sm text-slate-400">@{session.username}</p>
-          </>
-        )}
+        ) : avatar ? <button onClick={() => setView(true)} className="shrink-0">{pic}</button> : pic}
+        {/* ছবির পাশে নাম ও username (ছবির নিচের অর্ধেক কভারের নিচে, তাই লেখা কভারের ওপর পড়ে না) */}
+        <div className="min-w-0 flex-1 pb-1">
+          <p className="text-xl font-semibold truncate">{raw(editing ? d.name || session.fullName : session.fullName)}</p>
+          <p className="text-sm text-slate-400 truncate">@{session.username}</p>
+          {editing && avatar && (
+            <button onClick={onRemoveAvatar} className="text-sm text-red-400 pt-1">ছবি সরান</button>
+          )}
+        </div>
       </div>
       {view && avatar && <Lightbox src={avatar} onClose={() => setView(false)} />}
       {ok && <p className="text-sm text-emerald-400 text-center">{ok}</p>}
 
       {!editing ? (
         <Card>
-          <Row label="নাম" value={raw(session.fullName)} />
-          <Row label="Username" value={'@' + session.username} />
           <Row label="Bio" value={session.bio ? raw(session.bio) : '—'} />
-          <Row label="লিঙ্গ" value={genderLabel(session.gender)} />
-          <Row label="জন্ম তারিখ" value={fmtBirth(session.birthDate)} />
         </Card>
       ) : (
         <Card>
@@ -250,17 +238,24 @@ export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch
               placeholder="নিজের সম্পর্কে কিছু লিখুন"
               className="w-full rounded-lg bg-slate-900 px-4 py-3 outline-none focus:ring-2 ring-emerald-500 resize-none" />
             <span className="block text-right text-xs text-slate-500">{d.bio.length}/150</span></label>
-          <label className="block space-y-1"><span className="text-xs text-slate-400">লিঙ্গ</span>
-            <select value={d.gender} onChange={e => setD(x => ({ ...x, gender: e.target.value }))}
-              className="w-full rounded-lg bg-slate-900 px-4 py-3 outline-none focus:ring-2 ring-emerald-500">
-              {GENDERS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-            </select></label>
-          <label className="block space-y-1"><span className="text-xs text-slate-400">জন্ম তারিখ</span>
-            <Inp type="date" value={d.birth} min="1900-01-01" max={today()} onChange={e => setD(x => ({ ...x, birth: e.target.value }))} /></label>
           <Err msg={err} />
         </Card>
       )}
-      <p className="text-xs text-slate-500 text-center">লিঙ্গ, জন্ম তারিখ ও অনলাইন স্ট্যাটাস কে দেখবে তা প্রাইভেসি পেজে ঠিক করুন। ইমেইল ও পাসওয়ার্ডও সেখানে বদলানো যায়।</p>
+      {!editing && (
+        <Card>
+          <div className="divide-y divide-slate-700 -my-1">
+            {([['privacy', 'lock', 'প্রাইভেসি'], ['settings', 'sliders', 'সেটিংস']] as const).map(([k, ic, label]) => (
+              <button key={k} onClick={() => onGo(k)} className="w-full flex items-center gap-3 py-3 text-left">
+                <Icon name={ic} className="size-5 text-slate-300" />{label}
+              </button>
+            ))}
+            <button onClick={onLogout} className="w-full flex items-center gap-3 py-3 text-left text-red-300">
+              <Icon name="logout" className="size-5" />লগআউট
+            </button>
+          </div>
+        </Card>
+      )}
+      <p className="text-xs text-slate-500 text-center">অনলাইন স্ট্যাটাস কে দেখবে তা প্রাইভেসি পেজে ঠিক করুন। ইমেইল ও পাসওয়ার্ডও সেখানে বদলানো যায়।</p>
       {uname && <UsernameSheet onSubmit={onUsername} onClose={() => setUname(false)} />}
     </PageShell>
   )
@@ -423,7 +418,7 @@ export function PrivacyPage({ session, identity, onPatch, onClearAll, onDeleteAc
 // ---------- কে কী দেখতে পারবে ----------
 const VIS_OPTS: ['all' | 'contacts' | 'me', string][] = [['all', 'সবাই'], ['contacts', 'যাদের সঙ্গে চ্যাট করেছি'], ['me', 'শুধু আমি']]
 function VisibilityCard({ session, onPatch }: { session: Session; onPatch: (p: Partial<Session>) => void }) {
-  const [v, setV] = useState({ genderVis: session.genderVis, birthVis: session.birthVis, onlineVis: session.onlineVis })
+  const [v, setV] = useState({ onlineVis: session.onlineVis })
   const [msg, setMsg] = useState('')
   const { err, run } = useRun()
   const change = (k: keyof typeof v, val: string) => {
@@ -434,7 +429,7 @@ function VisibilityCard({ session, onPatch }: { session: Session; onPatch: (p: P
       onPatch(next); setMsg('সেটিং সেভ হয়েছে')
     })
   }
-  const groups: [keyof typeof v, string][] = [['genderVis', 'কে আমার লিঙ্গ দেখতে পারবে'], ['birthVis', 'কে আমার জন্ম তারিখ দেখতে পারবে'], ['onlineVis', 'কে আমার অনলাইন স্ট্যাটাস দেখতে পারবে']]
+  const groups: [keyof typeof v, string][] = [['onlineVis', 'কে আমার অনলাইন স্ট্যাটাস দেখতে পারবে']]
   return (
     <Card title="প্রোফাইলের দৃশ্যমানতা">
       {groups.map(([k, label]) => (

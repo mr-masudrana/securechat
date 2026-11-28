@@ -11,7 +11,7 @@ import { RichText } from './RichText'
 import Icon, { type IconName } from './Icon'
 import { beep, readReceiptsOn, soundOn } from './notify'
 import { syncPush } from './push'
-import { AccountPage, Card, Lightbox, PageShell, PrivacyPage, SettingsPage, fmtBirth, genderLabel } from './Pages'
+import { AccountPage, Card, Lightbox, PageShell, PrivacyPage, SettingsPage } from './Pages'
 import { locale, raw, t } from './i18n'
 import type { Session } from './types'
 
@@ -134,7 +134,6 @@ export default function Messenger({ session, onLogout, onSession }: {
   const [dl, setDl] = useState<DlState>({})
   const [myAvatar, setMyAvatar] = useState(session.avatar)
   const [page, setPage] = useState<PageName | null>(pageFromHash)
-  const [menuOpen, setMenuOpen] = useState(false)
   const openPage = (p: PageName) => { history.pushState({ page: p }, '', '#p/' + p); setPage(p) }
   const closePage = () => {
     if (history.state?.page) history.back() // popstate এসে page খালি করবে
@@ -193,11 +192,6 @@ export default function Messenger({ session, onLogout, onSession }: {
     await clearMessages(username)
     setMsgs([])
     if (activeRef.current) closeChat()
-  }
-  const goMenu = (k: 'account' | 'privacy' | 'settings' | 'logout') => {
-    setMenuOpen(false)
-    if (k === 'logout') onLogout()
-    else openPage(k)
   }
   const changeAvatar = async (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
@@ -659,34 +653,14 @@ export default function Messenger({ session, onLogout, onSession }: {
     <div className="h-dvh flex bg-slate-900 text-white">
       {/* ---- চ্যাট লিস্ট ---- */}
       <aside className={`${active ? 'hidden md:flex' : 'flex'} relative w-full md:w-80 flex-col border-r border-slate-800`}>
-        <header className="flex items-center gap-2 p-3 border-b border-slate-800">
-          <button onClick={() => openPage('account')} title="অ্যাকাউন্ট"><Avatar name={username} src={myAvatar} /></button>
-          <div className="flex-1 min-w-0">
-            <p className="font-bold flex items-center gap-1"><Icon name="lock" className="size-4 text-emerald-400" /> SecureChat</p>
-            <p className="text-xs text-slate-400">
-              @{username} <span className={online ? 'text-emerald-400' : 'text-red-400'}><i className="inline-block size-2 rounded-full bg-current mr-1" />{online ? 'অনলাইন' : 'অফলাইন'}</span>
-            </p>
-          </div>
-          <button onClick={() => setMenuOpen(o => !o)} className="size-9 grid place-items-center rounded-full text-slate-300 hover:bg-slate-800" title="মেনু">
-            <Icon name="dots" className="size-6" />
+        <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-800">
+          <p className="font-bold text-lg">SecureChat</p>
+          {/* ডানে প্রোফাইল ছবি: ট্যাপে প্রোফাইল পেজ। কোণার বিন্দু কানেকশন দেখায় (সবুজ অনলাইন, লাল অফলাইন) */}
+          <button onClick={() => openPage('account')} title="প্রোফাইল" className="relative shrink-0">
+            <Avatar name={username} src={myAvatar} />
+            <span className={`absolute bottom-0 right-0 size-3 rounded-full ring-2 ring-slate-900 ${online ? 'bg-emerald-400' : 'bg-red-400'}`} />
           </button>
         </header>
-        {menuOpen && (
-          <>
-            <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
-            <div className="absolute right-2 top-14 z-40 w-52 rounded-xl bg-slate-800 border border-slate-700 shadow-xl py-1">
-              {([['account', 'user', 'অ্যাকাউন্ট'], ['privacy', 'lock', 'প্রাইভেসি'], ['settings', 'sliders', 'সেটিংস']] as const).map(([k, ic, label]) => (
-                <button key={k} onClick={() => goMenu(k)} className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-slate-700">
-                  <Icon name={ic} className="size-5 text-slate-300" />{label}
-                </button>
-              ))}
-              <div className="my-1 border-t border-slate-700" />
-              <button onClick={() => goMenu('logout')} className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-red-300 hover:bg-slate-700">
-                <Icon name="logout" className="size-5" />লগআউট
-              </button>
-            </div>
-          </>
-        )}
         <div className="flex-1 overflow-y-auto pb-24">
           {convos.length === 0 && (
             <p className="p-6 text-center text-slate-400 text-sm">কোনো চ্যাট নেই। নিচের + বাটন চেপে নতুন চ্যাট শুরু করুন।</p>
@@ -744,7 +718,7 @@ export default function Messenger({ session, onLogout, onSession }: {
         </div>
       )}
       {page === 'account' && (
-        <AccountPage session={session} avatar={myAvatar} onAvatar={changeAvatar} onRemoveAvatar={removeAvatar} onPatch={onSession}
+        <AccountPage session={session} avatar={myAvatar} onAvatar={changeAvatar} onRemoveAvatar={removeAvatar} onPatch={onSession} onGo={openPage} onLogout={onLogout}
           onUsername={changeUsername} onBack={closePage} />
       )}
       {page === 'privacy' && (
@@ -1179,7 +1153,7 @@ function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
 }) {
   const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
   const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string; publicKey?: string | null
-    gender?: string | null; birthDate?: string | null; hasCover?: boolean } | null>(null)
+    hasCover?: boolean } | null>(null)
   const [cover, setCover] = useState<string | null>(null)
   const [verified, setVerified] = useState(false)
   const [safety, setSafety] = useState(false)
@@ -1214,12 +1188,6 @@ function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
       </Card>
       {onChat && (
         <button onClick={onChat} className="w-full rounded-xl bg-emerald-600 py-3 font-semibold">মেসেজ করুন</button>
-      )}
-      {u && (u.gender || u.birthDate) && (
-        <Card title="ব্যক্তিগত তথ্য">
-          {u.gender && <p className="flex justify-between"><span className="text-slate-400">লিঙ্গ</span><span>{genderLabel(u.gender)}</span></p>}
-          {u.birthDate && <p className="flex justify-between"><span className="text-slate-400">জন্ম তারিখ</span><span>{fmtBirth(u.birthDate)}</span></p>}
-        </Card>
       )}
       <Card title="নিরাপত্তা">
         <p className="text-sm text-slate-300 flex items-center gap-2">

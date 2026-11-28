@@ -19,8 +19,8 @@ export default function App() {
     const identity = await ensureIdentity(me.id, me.username, token, me.publicKey ?? null, fresh)
     setPending(null)
     setSession({ id: me.id, username: me.username, fullName: me.fullName, email: me.email, avatar: me.avatar,
-      bio: me.bio, gender: me.gender, birthDate: me.birthDate,
-      genderVis: me.genderVis, birthVis: me.birthVis, onlineVis: me.onlineVis, hasCover: me.hasCover, token, identity })
+      bio: me.bio,
+      onlineVis: me.onlineVis, hasCover: me.hasCover, token, identity })
   }
   const safeEnter = (tok: string, m: Me) =>
     enter(tok, m, true).catch(() => alert(t('সংযোগে সমস্যা হয়েছে, আবার চেষ্টা করুন')))
