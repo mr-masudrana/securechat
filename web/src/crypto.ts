@@ -19,6 +19,7 @@ export type Body = {
   ed?: { id: string; t: string }
   dl?: { id: string }
   rn?: { old: string } // নিজের username বদলের খবর
+  i?: string // মেসেজ id (এনক্রিপ্টেডের ভেতরে): সার্ভার পুরনো ciphertext নতুন id দিয়ে replay করলে ধরা পড়ে
 }
 export type StoredMsg = {
   mid: string; owner: string; peer: string
@@ -90,11 +91,17 @@ export async function fingerprint(pubB64: string) {
     .map(b => b.toString(16).padStart(2, '0')).join(' ')
 }
 
+type UserInfo = { id: string; username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string
+  hasCover?: boolean }
 export async function lookupUser(peer: string, token: string) {
-  const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as
-    { username: string; publicKey: string | null; fullName?: string; avatar?: string | null; bio?: string
-      hasCover?: boolean }
-  // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
+  const u = (await call('/api/users/' + encodeURIComponent(peer), 'GET', undefined, token)) as UserInfo
+  return remember(u)
+}
+// id দিয়ে লুকআপ: প্রেরক নাম বদলালেও (জমা থাকা মেসেজের) কী পাওয়া যায়
+async function lookupById(uid: string, token: string) {
+  return remember((await call('/api/uid/' + encodeURIComponent(uid), 'GET', undefined, token)) as UserInfo)
+}
+function remember(u: UserInfo) {  // সর্বশেষ দেখা কী মনে রাখি: কেউ username বদলালে সত্যিই একই ব্যক্তি কিনা যাচাইয়ের জন্য
   if (u.publicKey) {
     const n = u.username.toLowerCase()
     localStorage.setItem('pk:' + n, u.publicKey)
@@ -121,41 +128,60 @@ export async function safetyNumber(myPub: string, peerPub: string) {
 }
 
 // ---------- শেয়ার্ড কী ----------
-type Shared = { key: CryptoKey; username: string; at: number }
-const cache = new Map<string, Shared>()
+// ECDH → HKDF-SHA256 → AES-GCM। কী দুজনের পাবলিক কী-র সঙ্গে বাঁধা; AAD-তে username নয়, ইউজার id (নাম বদলালেও মেসেজ খোলে)
+type Peer = { id: string; key: CryptoKey; username: string; at: number; me: string } // me: কার প্রাইভেট কী দিয়ে বানানো (অ্যাকাউন্ট বদলালে পুরনো কী ব্যবহার হয় না)
+const byId = new Map<string, Peer>()
+const byName = new Map<string, string>()
 
-async function sharedKey(id: Identity, peer: string, token: string): Promise<Shared> {
-  const name = peer.toLowerCase()
-  const hit = cache.get(name)
-  // ৬০ সেকেন্ডের বেশি পুরনো হলে আবার আনুন, কারণ পিয়ার নতুন ব্রাউজারে লগইন করলে কী বদলায়
-  if (hit && Date.now() - hit.at < 60_000) return hit
-  const r = await lookupUser(peer, token)
-  if (!r.publicKey) throw new Error('এই ইউজারের এনক্রিপশন কী নেই')
+async function derive(id: Identity, pubB64: string): Promise<CryptoKey> {
   const pub = await crypto.subtle.importKey(
-    'raw', fromB64(r.publicKey), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
-  const key = await crypto.subtle.deriveKey(
-    { name: 'ECDH', public: pub }, id.privateKey,
-    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
-  const v = { key, username: r.username, at: Date.now() }
-  cache.set(name, v)
+    'raw', fromB64(pubB64), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+  // পুরনো আইডেন্টিটির প্রাইভেট কী-তে শুধু 'deriveKey' অনুমতি আছে, তাই ECDH থেকে সরাসরি HKDF কী নিই
+  const hk = await crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, id.privateKey, { name: 'HKDF' }, false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('securechat-v2'),
+      info: enc.encode([id.publicKeyB64, pubB64].sort().join('|')) },
+    hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+}
+
+async function peerFrom(id: Identity, r: UserInfo): Promise<Peer> {
+  if (!r.publicKey) throw new Error('এই ইউজারের এনক্রিপশন কী নেই')
+  const v = { id: r.id, key: await derive(id, r.publicKey), username: r.username, at: Date.now(), me: id.publicKeyB64 }
+  byId.set(v.id, v)
+  byName.set(r.username.toLowerCase(), v.id)
   return v
 }
 
-// পিয়ারের কী ক্যাশ ভুলে যাওয়া (ডিক্রিপ্ট ব্যর্থ হলে নতুন কী এনে আবার চেষ্টা করার জন্য)
-export const forgetKey = (peer: string) => { cache.delete(peer.toLowerCase()) }
+// ৬০ সেকেন্ডের বেশি পুরনো হলে আবার আনা হয়, কারণ পিয়ার নতুন ব্রাউজারে লগইন করলে কী বদলায়
+async function peerByName(id: Identity, name: string, token: string): Promise<Peer> {
+  const hit = byId.get(byName.get(name.toLowerCase()) ?? '')
+  if (hit && hit.me === id.publicKeyB64 && Date.now() - hit.at < 60_000) return hit
+  return peerFrom(id, await lookupUser(name, token))
+}
+async function peerById(id: Identity, uid: string, token: string): Promise<Peer> {
+  const hit = byId.get(uid)
+  if (hit && hit.me === id.publicKeyB64 && Date.now() - hit.at < 60_000) return hit
+  return peerFrom(id, await lookupById(uid, token))
+}
 
-const aad = (from: string, to: string) => enc.encode(`${from.toLowerCase()}>${to.toLowerCase()}`)
+// পিয়ারের কী ক্যাশ ভুলে যাওয়া (নাম বা id দিয়ে); ডিক্রিপ্ট ব্যর্থ হলে নতুন কী এনে আবার চেষ্টার জন্য
+export const forgetKey = (x: string) => { byId.delete(byName.get(x.toLowerCase()) ?? x) }
 
-export async function encryptBody(id: Identity, me: string, peer: string, token: string, body: Body) {
-  const { key, username } = await sharedKey(id, peer, token)
+// me/peer এখানে ইউজার id
+const aad = (from: string, to: string) => enc.encode(`${from}>${to}`)
+
+// myId: নিজের ইউজার id। msgId এনক্রিপ্টেড বডির ভেতরে ঢোকে এবং সার্ভারে যাওয়া id-র সঙ্গে মিলতে হয়
+export async function encryptBody(id: Identity, myId: string, peer: string, token: string, body: Body,
+  msgId: string = crypto.randomUUID()) {
+  const { key, username, id: peerId } = await peerByName(id, peer, token)
   // কী বদলে গেলে (এবং এখনো মেনে নেওয়া না হলে) সাধারণ মেসেজ/ফাইল পাঠানো বন্ধ; রিসিপ্ট ও কন্ট্রোল মেসেজ চলে
   if ((body.t !== undefined || body.f) && pinChanged(username))
     throw new Error(`@${username}-এর নিরাপত্তা কী বদলেছে। চ্যাটের উপরের নোটিশ থেকে সেফটি নাম্বার মিলিয়ে "বুঝেছি, নতুন কী মেনে নিলাম" চাপুন`)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ct = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: aad(me, username) },
-    key, enc.encode(JSON.stringify(body)))
-  return { payload: toB64(iv) + '.' + toB64(ct), peer: username }
+    { name: 'AES-GCM', iv, additionalData: aad(myId, peerId) },
+    key, enc.encode(JSON.stringify({ ...body, i: msgId })))
+  return { payload: toB64(iv) + '.' + toB64(ct), peer: username, msgId }
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -175,14 +201,17 @@ function cleanFile(f: any): FileMeta | undefined {
 }
 
 // নেটওয়ার্ক সমস্যায় throw করে। ডিক্রিপ্ট ব্যর্থ হলে null দেয়।
-export async function decryptBody(id: Identity, me: string, from: string, token: string, payload: string): Promise<Body | null> {
-  const { key } = await sharedKey(id, from, token)
+// myId/fromId: ইউজার id। fromId না থাকলে (পুরনো ফরম্যাটের জমা মেসেজ) null
+export async function decryptBody(id: Identity, myId: string, fromId: string | undefined, token: string, payload: string): Promise<Body | null> {
+  if (!fromId) return null
+  const { key } = await peerById(id, fromId, token)
   try {
     const [iv, ct] = payload.split('.')
     const buf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: fromB64(iv), additionalData: aad(from, me) }, key, fromB64(ct))
+      { name: 'AES-GCM', iv: fromB64(iv), additionalData: aad(fromId, myId) }, key, fromB64(ct))
     const o = JSON.parse(dec.decode(buf))
     const body: Body = {}
+    if (typeof o.i === 'string' && o.i.length > 0 && o.i.length <= 64) body.i = o.i
     if (typeof o.t === 'string') body.t = o.t.slice(0, 5000)
     const f = cleanFile(o.f)
     if (f) body.f = f

@@ -24,3 +24,5 @@
   --color-emerald-400: #34d399;
   color: #ffffff;
 }
+
+html, body { overscroll-behavior: none; }

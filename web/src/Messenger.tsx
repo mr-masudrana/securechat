@@ -5,8 +5,8 @@ import {
   acceptKey, deleteIdentity, forgetKey, pinChanged, deleteChat as deleteChatLocal, decryptBody, decryptFile, encryptBody, encryptFile, clearMessages, deleteMessage, renameOwner, renamePeer, getMessage, loadMessages, lookupUser, mutateMessage, REACTIONS,
   MAX_FILE, patchMessage, safetyNumber, saveMessage, type Body, type FileMeta, type Quote, type StoredMsg,
 } from './crypto'
-import { fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType } from './media'
-import { usePresence, useProfile } from './profiles'
+import { fixType, fmtDur, fmtSize, isAudio, isImg, makeThumb, prepareImage, previewText, resizeAvatar, safeType, snapshot } from './media'
+import { usePresence, useProfile, type Presence } from './profiles'
 import { RichText } from './RichText'
 import Icon, { type IconName } from './Icon'
 import { beep, readReceiptsOn, soundOn } from './notify'
@@ -45,12 +45,20 @@ const hhmm = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digi
 // চ্যাটের তারিখ-লেবেল: আজ / গতকাল / সপ্তাহের বার / পুরো তারিখ
 const dayKey = (ts: number) => new Date(ts).toDateString()
 // অনলাইন / সর্বশেষ দেখা (মালিক দেখাতে না দিলে কিছুই দেখায় না)
-function PresenceLine({ peer, token }: { peer: string; token: string }) {
-  const p = usePresence(peer, token)
+function PresenceLine({ p }: { p: Presence | null }) {
   if (!p?.visible) return null
   if (p.online) return <p className="text-xs text-emerald-400 flex items-center gap-1"><span className="size-2 rounded-full bg-emerald-400" />অনলাইন</p>
   if (!p.lastSeen) return null
   return <p className="text-xs text-slate-400">{'সর্বশেষ দেখা '}{dayLabel(p.lastSeen)}{' '}{hhmm(p.lastSeen)}</p>
+}
+
+// ছবির কোণার বিন্দু: সবুজ = অনলাইন, ধূসর = অফলাইন; মালিক স্ট্যাটাস দেখাতে না দিলে কিছুই নয়
+function StatusDot({ p, big }: { p: Presence | null; big?: boolean }) {
+  if (!p?.visible) return null
+  return (
+    <span title={p.online ? 'অনলাইন' : 'অফলাইন'}
+      className={`absolute rounded-full ${big ? 'size-5 bottom-0.5 right-0.5 ring-4' : 'size-3.5 bottom-0 right-0 ring-2'} ring-slate-900 ${p.online ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+  )
 }
 
 function dayLabel(ts: number) {
@@ -112,15 +120,31 @@ const fromHash = () => {
   try { return m ? decodeURIComponent(m[1]) : null } catch { return null }
 }
 
+// কিবোর্ড খুললে ভিজ্যুয়াল ভিউপোর্ট ছোট হয় ও পেজ ওপরে সরে যায়; তখন টপ বার হারিয়ে যেত। অ্যাপের উচ্চতা ও অবস্থান ভিউপোর্টের সঙ্গে মেলানো হয়
+function useViewport() {
+  const read = () => ({ h: window.visualViewport?.height ?? window.innerHeight, top: window.visualViewport?.offsetTop ?? 0 })
+  const [v, setV] = useState(read)
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv) return
+    const f = () => { setV(read()); if (window.scrollY) window.scrollTo(0, 0) }
+    vv.addEventListener('resize', f)
+    vv.addEventListener('scroll', f)
+    return () => { vv.removeEventListener('resize', f); vv.removeEventListener('scroll', f) }
+  }, [])
+  return v
+}
+
 export default function Messenger({ session, onLogout, onSession }: {
   session: Session; onLogout: () => void; onSession: (p: Partial<Session>) => void
 }) {
   const { username, token, identity } = session
   const owner = username.toLowerCase()
+  const vp = useViewport()
   const [msgs, setMsgs] = useState<StoredMsg[]>([])
   const [online, setOnline] = useState(false)
   const [active, setActive] = useState<string | null>(() => fromHash() ?? profileFromHash())
-  const [profilePeer, setProfilePeer] = useState<string | null>(null)
+  const [profilePeer, setProfilePeer] = useState<string | null>(profileFromHash) // রিফ্রেশে প্রোফাইল পেজই থাকে
   const [profileRev, setProfileRev] = useState(0)
   const openProfile = (p: string) => { history.pushState({ profile: p }, '', '#u/' + encodeURIComponent(p)); setProfilePeer(p) }
   const closeProfile = () => {
@@ -194,14 +218,15 @@ export default function Messenger({ session, onLogout, onSession }: {
     if (activeRef.current) closeChat()
   }
   const changeAvatar = async (e: ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
-    e.target.value = ''
-    if (!f) return
+    const f0 = e.target.files?.[0]
+    if (!f0) { e.target.value = ''; return }
     try {
+      const f = await snapshot(f0)
+      e.target.value = ''
       const a = await resizeAvatar(f)
       await call('/api/profile', 'POST', { avatar: a }, token)
       setMyAvatar(a)
-    } catch (err: any) { setToast(err.message || 'ছবি বদলানো যায়নি') }
+    } catch (err: any) { e.target.value = ''; setToast(err.message || 'ছবি বদলানো যায়নি') }
   }
   const dlBusy = useRef(new Set<string>())
   const conn = useRef<Conn | null>(null)
@@ -222,9 +247,9 @@ export default function Messenger({ session, onLogout, onSession }: {
         for (let i = 0; i < ids.length; i += 50) {
           if (!conn.current?.isOpen()) return
           try {
-            const { payload, peer: canon } = await encryptBody(identity, username, peer, token,
+            const { payload, peer: canon, msgId } = await encryptBody(identity, session.id, peer, token,
               { c: { k, ids: ids.slice(i, i + 50) } })
-            conn.current.send(canon, payload, undefined, true) // রিসিপ্টে পুশ নয়
+            conn.current.send(canon, payload, msgId, true) // রিসিপ্টে পুশ নয়
           } catch { /* রিসিপ্ট হারালে শুধু টিক আপডেট হয় না */ }
         }
       }
@@ -264,8 +289,8 @@ export default function Messenger({ session, onLogout, onSession }: {
   const sendControl = async (peer: string, body: Body) => {
     if (!conn.current?.isOpen()) { setToast('কানেকশন নেই, একটু পরে চেষ্টা করুন'); return false }
     try {
-      const { payload, peer: canon } = await encryptBody(identity, username, peer, token, body)
-      return !!conn.current.send(canon, payload, undefined, true) // নোটিফিকেশন নয়
+      const { payload, peer: canon, msgId } = await encryptBody(identity, session.id, peer, token, body)
+      return !!conn.current.send(canon, payload, msgId, true) // নোটিফিকেশন নয়
     } catch (e: any) { setToast(e.message); return false }
   }
   const senderOf = (m: StoredMsg) => (m.mine ? username : m.peer)
@@ -357,10 +382,17 @@ export default function Messenger({ session, onLogout, onSession }: {
 
   // ব্যাক বাটন/সোয়াইপ: চ্যাট থেকে লিস্টে ফেরা (অ্যাপ থেকে বের হয় না)
   useEffect(() => {
-    const c = fromHash() ?? profileFromHash(), p = pageFromHash(), h = c ? '#c/' + encodeURIComponent(c) : location.hash
-    if ((c || p) && !history.state?.chat && !history.state?.page) { // সরাসরি লিংকে খুললে নিচে লিস্টের একটা এন্ট্রি বসাই
+    const c = fromHash(), u = profileFromHash(), p = pageFromHash()
+    if (u) {
+      // রিফ্রেশে ব্রাউজার history.state রেখে দেয়, তখন কিছু করি না। সরাসরি লিংকে খুললে লিস্ট → চ্যাট → প্রোফাইল এন্ট্রি বসাই
+      if (!history.state?.profile) {
+        history.replaceState(null, '', location.pathname + location.search)
+        history.pushState({ chat: u }, '', '#c/' + encodeURIComponent(u))
+        history.pushState({ profile: u }, '', '#u/' + encodeURIComponent(u))
+      }
+    } else if ((c || p) && !history.state?.chat && !history.state?.page) { // সরাসরি লিংকে খুললে নিচে লিস্টের একটা এন্ট্রি বসাই
       history.replaceState(null, '', location.pathname + location.search)
-      history.pushState(c ? { chat: c } : { page: p }, '', h)
+      history.pushState(c ? { chat: c } : { page: p }, '', c ? '#c/' + encodeURIComponent(c) : location.hash)
     }
     const onPop = () => {
       const u = profileFromHash()
@@ -422,8 +454,10 @@ export default function Messenger({ session, onLogout, onSession }: {
     }
   }
 
-  const autoable = (m: StoredMsg) =>
-    !m.mine && !!m.file && !m.blob && !m.gone && (isImg(m.file.m) || isAudio(m.file.m)) && m.file.s <= AUTO_MAX
+  // অচেনা প্রেরকের ফাইল নিজে নিজে নামে না: যার সঙ্গে আমি অন্তত একবার মেসেজ পাঠিয়েছি শুধু তার ফাইল অটো-ডাউনলোড
+  const autoable = (m: StoredMsg, list: StoredMsg[] = msgsRef.current) =>
+    !m.mine && !!m.file && !m.blob && !m.gone && (isImg(m.file.m) || isAudio(m.file.m)) && m.file.s <= AUTO_MAX &&
+    list.some(x => x.mine && x.peer.toLowerCase() === m.peer.toLowerCase())
 
   useEffect(() => {
     let alive = true
@@ -434,7 +468,7 @@ export default function Messenger({ session, onLogout, onSession }: {
       const stuck = new Set(stored.filter(m => m.mine && m.status === 'sending').map(m => m.mid))
       stuck.forEach(mid => void patchMessage(mid, { status: 'failed' }))
       setMsgs(cur => mergeAll(cur, stored.map(m => (stuck.has(m.mid) ? { ...m, status: 'failed' as const } : m))))
-      stored.filter(autoable).forEach(m => void downloadFile(m))
+      stored.filter(m => autoable(m, stored)).forEach(m => void downloadFile(m))
     })
     conn.current = connect(token, {
       onStatus: setOnline,
@@ -443,13 +477,24 @@ export default function Messenger({ session, onLogout, onSession }: {
       onMsg: async m => {
         // অন্য ডিভাইস কী কেড়ে নিয়ে থাকলে ack/সেভ নয়: মেসেজ সার্ভারে থেকে যাবে, ঠিক ডিভাইস পাবে
         if (staleRef.current) throw new Error('stale')
-        let body = await decryptBody(identity, username, m.from, token, m.payload)
-        if (body === null) {
-          // হয়তো পিয়ার নতুন কী নিয়েছে আর ক্যাশে পুরনোটা ছিল: নতুন কী এনে আরেকবার
-          forgetKey(m.from)
-          body = await decryptBody(identity, username, m.from, token, m.payload)
-          if (body === null && await checkStale()) { setStale(true); throw new Error('stale') }
+        // প্রেরককে id দিয়ে খুঁজি, তাই সে বা আমি নাম বদলালেও জমা মেসেজ খোলে
+        const tryDecrypt = () => decryptBody(identity, session.id, m.fromId, token, m.payload)
+        let body: Body | null
+        try {
+          body = await tryDecrypt()
+          if (body === null) {
+            // হয়তো পিয়ার নতুন কী নিয়েছে আর ক্যাশে পুরনোটা ছিল: নতুন কী এনে আরেকবার
+            forgetKey(m.fromId ?? m.from)
+            body = await tryDecrypt()
+            if (body === null && await checkStale()) { setStale(true); throw new Error('stale') }
+          }
+        } catch (e: any) {
+          // প্রেরকের অ্যাকাউন্ট আর নেই: মেসেজ খোলার উপায় নেই, ack করে ইনবক্স থেকে সরাই (নইলে চিরতরে আটকে থাকত)
+          if (e?.message === 'Not found') return true
+          throw e
         }
+        // এনক্রিপ্টেডের ভেতরের id সার্ভারের id-র সঙ্গে না মিললে এটা replay বা বানানো: ফেলে দিই
+        if (body && body.i !== m.id) return true
         if (body?.c) { // রিসিপ্ট: বাবল নয়, শুধু টিক আপডেট
           for (const id of body.c.ids)
             void setStatus(`${owner}|out|${id}`, body.c.k === 'r' ? 'read' : 'delivered', m.from)
@@ -590,7 +635,7 @@ export default function Messenger({ session, onLogout, onSession }: {
       if (m.file) body.f = m.file
       if (m.q) body.q = m.q
       if (m.fw) body.fw = 1
-      const { payload, peer: canon } = await encryptBody(identity, username, m.peer, token, body)
+      const { payload, peer: canon } = await encryptBody(identity, session.id, m.peer, token, body, idOf(m))
       await apply(m.mid, cur => ({ ...cur, status: 'sending' }))
       if (!conn.current.send(canon, payload, idOf(m))) void setStatus(m.mid, 'failed')
       else watchSend(m.mid)
@@ -603,8 +648,9 @@ export default function Messenger({ session, onLogout, onSession }: {
       const body: Body = { t: text }
       if (q) body.q = q
       if (fw) body.fw = 1
-      const { payload, peer: canon } = await encryptBody(identity, username, peer, token, body)
-      return await deliver(crypto.randomUUID(), canon, payload, { text, q, fw })
+      const id = crypto.randomUUID()
+      const { payload, peer: canon } = await encryptBody(identity, session.id, peer, token, body, id)
+      return await deliver(id, canon, payload, { text, q, fw })
     } catch (e: any) {
       setToast(e.message === 'Not found' ? 'ইউজার পাওয়া যায়নি' : e.message)
       return false
@@ -612,6 +658,7 @@ export default function Messenger({ session, onLogout, onSession }: {
   }
 
   const sendFile = async (peer: string, file: File, caption: string, dur?: number, q?: Quote, fw?: boolean) => {
+    file = fixType(file) // টাইপ খালি এলে এক্সটেনশন থেকে (যাতে ছবি ছবি হিসেবেই যায়)
     if (!fw && file.type.startsWith('image/')) file = await prepareImage(file) // ছোট করে JPEG
     if (file.size === 0) { setToast('ফাইলটা খালি'); return false }
     if (file.size > MAX_FILE) { setToast('ফাইল সর্বোচ্চ ২০ MB হতে পারবে'); return false }
@@ -633,13 +680,14 @@ export default function Messenger({ session, onLogout, onSession }: {
       if (caption) body.t = caption
       if (q) body.q = q
       if (fw) body.fw = 1
-      let r = await encryptBody(identity, username, peer, token, body)
+      const id = crypto.randomUUID()
+      let r = await encryptBody(identity, session.id, peer, token, body, id)
       if (r.payload.length > 90_000) { // মেসেজ বেশি বড় হলে থাম্বনেইল বাদ
         delete meta.th
-        r = await encryptBody(identity, username, peer, token, body)
+        r = await encryptBody(identity, session.id, peer, token, body, id)
       }
       sent = true
-      return await deliver(crypto.randomUUID(), r.peer, r.payload, {
+      return await deliver(id, r.peer, r.payload, {
         text: caption, file: meta, blob: new Blob([plain], { type: safeType(meta.m) }), q, fw,
       })
     } catch (e: any) {
@@ -650,7 +698,7 @@ export default function Messenger({ session, onLogout, onSession }: {
   }
 
   return (
-    <div className="h-dvh flex bg-slate-900 text-white">
+    <div className="fixed inset-x-0 flex bg-slate-900 text-white" style={{ top: vp.top, height: vp.h }}>
       {/* ---- চ্যাট লিস্ট ---- */}
       <aside className={`${active ? 'hidden md:flex' : 'flex'} relative w-full md:w-80 flex-col border-r border-slate-800`}>
         <header className="flex items-center justify-between gap-2 p-3 border-b border-slate-800">
@@ -700,7 +748,7 @@ export default function Messenger({ session, onLogout, onSession }: {
             list={msgs.filter(m => m.peer.toLowerCase() === active.toLowerCase())}
             onSend={sendText} onSendFile={sendFile} onDownload={downloadFile}
             act={{ react, pin, edit, del, forward, retry, openUser }} peers={convos.map(c => c.peer)}
-            onOpenProfile={openProfile} rev={profileRev} onBack={closeChat} />
+            onOpenProfile={openProfile} rev={profileRev} onBack={closeChat} notify={setToast} />
         ) : (
           <div className="flex-1 grid place-items-center text-slate-500">একটা চ্যাট বেছে নিন</div>
         )}
@@ -711,7 +759,7 @@ export default function Messenger({ session, onLogout, onSession }: {
           <div className="w-full max-w-sm bg-slate-800 rounded-xl p-4 space-y-3" onClick={e => e.stopPropagation()}>
             <p className="font-semibold">নতুন চ্যাট</p>
             <input autoFocus value={newName} onChange={e => setNewName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && startChat()} placeholder="username"
+              onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && startChat()} placeholder="username"
               className="w-full rounded-lg bg-slate-900 px-4 py-3 outline-none focus:ring-2 ring-emerald-500" />
             <button onClick={startChat} className="w-full rounded-lg bg-emerald-600 py-3 font-semibold">শুরু করুন</button>
           </div>
@@ -805,14 +853,14 @@ function Media({ m, state, onDownload }: {
   )
 }
 
-function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onOpenProfile, rev, onBack }: {
+function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onDownload, onOpenProfile, rev, onBack, notify }: {
   peer: string; session: Session; list: StoredMsg[]; dl: DlState
   act: Actions; peers: string[]
   onSend: (peer: string, text: string, q?: Quote) => Promise<boolean>
   onSendFile: (peer: string, file: File, caption: string, dur?: number, q?: Quote) => Promise<boolean>
   onDownload: (m: StoredMsg) => void
   onOpenProfile: (peer: string) => void; rev: number
-  onBack: () => void
+  onBack: () => void; notify: (m: string) => void
 }) {
   const vk = `verified:${session.username.toLowerCase()}:${peer.toLowerCase()}`
   const [text, setText] = useState('')
@@ -822,6 +870,17 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const bottom = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const imgRef = useRef<HTMLInputElement>(null)
+  const camRef = useRef<HTMLInputElement>(null)
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  // ইনপুট লেখা অনুযায়ী বাড়ে, সর্বোচ্চ ৫ লাইন (এরপর স্ক্রোল)
+  useLayoutEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 24 * 5 + 24) + 'px'
+  }, [text, rec])
+  const [staged, setStaged] = useState<File[]>([]) // পাঠানোর অপেক্ষায় থাকা ফাইল/ছবি
+  const [attachOpen, setAttachOpen] = useState(false)
   const [rec, setRec] = useState(false)
   const [secs, setSecs] = useState(0)
   const mr = useRef<MediaRecorder | null>(null)
@@ -829,6 +888,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const cancelled = useRef(false)
   const startedAt = useRef(0)
   const prof = useProfile(peer, session.token)
+  const pres = usePresence(peer, session.token)
   const owner = session.username.toLowerCase()
   const [replyTo, setReplyTo] = useState<StoredMsg | null>(null)
   const [editing, setEditing] = useState<StoredMsg | null>(null)
@@ -876,15 +936,17 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     if (sending) return
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined')
       return alert(t('এই ব্রাউজারে ভয়েস রেকর্ড করা যাচ্ছে না'))
+    let stream: MediaStream | null = null
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const s0 = stream
       const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported(t))
       const r = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 32000 } : undefined)
       chunks.current = []
       cancelled.current = false
       r.ondataavailable = e => { if (e.data.size) chunks.current.push(e.data) }
       r.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop())
+        s0.getTracks().forEach(t => t.stop())
         setRec(false)
         if (cancelled.current || !chunks.current.length) return
         const mime = (r.mimeType || type || 'audio/webm').split(';')[0]
@@ -901,6 +963,7 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       setSecs(0)
       setRec(true)
     } catch {
+      stream?.getTracks().forEach(t => t.stop()) // রেকর্ডার তৈরি ব্যর্থ হলেও মাইক চালু না থাকে
       alert(t('মাইক্রোফোনের অনুমতি দিন'))
     }
   }
@@ -973,23 +1036,43 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   useEffect(() => { if (pinChanged(peer)) setKeyChanged(true) }, [list.length]) // নতুন মেসেজে কী বদলালে নোটিশ
   const submit = async () => {
     const t = text.trim()
-    if (!t) return
+    if (!t && !staged.length) return
     if (editing) { // এডিট মোড: নতুন মেসেজ নয়, আগেরটা বদলায়
+      if (!t) return
       if (await act.edit(editing, t)) { setEditing(null); setText('') }
+      return
+    }
+    if (staged.length) { // একটার পর একটা পাঠানো; লেখা প্রথম ফাইলের ক্যাপশন হয়
+      if (sending) return
+      setSending(true)
+      const q = makeQuote()
+      let done = 0
+      for (const f of staged) {
+        if (!(await onSendFile(peer, f, done === 0 ? t : '', undefined, done === 0 ? q : undefined))) break
+        done++
+        if (done === 1) { setText(''); setReplyTo(null) }
+      }
+      setStaged(l => l.slice(done))
+      if (done < staged.length && pinChanged(peer)) setKeyChanged(true)
+      setSending(false)
       return
     }
     if (await onSend(peer, t, makeQuote())) { setText(''); setReplyTo(null) }
     else if (pinChanged(peer)) setKeyChanged(true) // কী বদলানোয় পাঠানো আটকেছে: নোটিশ দেখাই
   }
 
+  const MAX_STAGED = 10
   const pick = async (e: ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
+    const picked = Array.from(e.target.files ?? [])
+    if (!picked.length) { e.target.value = ''; return }
+    const room = MAX_STAGED - staged.length
+    if (room <= 0) { e.target.value = ''; notify('একসঙ্গে সর্বোচ্চ ১০টি ফাইল পাঠানো যায়'); return }
+    let files: File[]
+    try { files = await Promise.all(picked.slice(0, room).map(snapshot)) } // ইনপুট খালি করার আগেই ফাইল পড়ে নিই
+    catch { e.target.value = ''; notify('ফাইলটা পড়া যায়নি, আবার বেছে নিন'); return }
     e.target.value = ''
-    if (!f || sending) return
-    setSending(true)
-    if (await onSendFile(peer, f, text.trim(), undefined, makeQuote())) { setText(''); setReplyTo(null) } // লেখা থাকলে ক্যাপশন
-    else if (pinChanged(peer)) setKeyChanged(true)
-    setSending(false)
+    if (picked.length > room) notify('একসঙ্গে সর্বোচ্চ ১০টি ফাইল পাঠানো যায়')
+    setStaged(l => [...l, ...files])
   }
 
   return (
@@ -997,11 +1080,13 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
       <header className="flex items-center gap-3 p-3 border-b border-slate-800">
         <button onClick={onBack} className="md:hidden px-1 text-slate-300"><Icon name="back" className="size-6" /></button>
         <button onClick={() => onOpenProfile(peer)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
-        <PeerAvatar peer={peer} token={session.token} />
+        <span className="relative shrink-0">
+          <PeerAvatar peer={peer} token={session.token} />
+          <StatusDot p={pres} />
+        </span>
         <div className="flex-1 min-w-0">
           <p className="font-semibold truncate">{prof?.fullName ? raw(prof.fullName) : '@' + peer}</p>
           <p className="text-xs text-slate-400 flex items-center gap-1">{prof ? '@' + peer + ' · ' : ''}{verified ? <><Icon name="shield" className="size-3.5 text-emerald-400" />ভেরিফাইড</> : <><Icon name="lock" className="size-3.5" />এন্ড-টু-এন্ড এনক্রিপ্টেড</>}</p>
-          <PresenceLine peer={peer} token={session.token} />
         </div>
         </button>
       </header>
@@ -1040,13 +1125,18 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
             <div className={`rounded-2xl px-3 py-2 break-words space-y-1 ${
               m.failed ? 'bg-red-900' : m.mine ? 'bg-emerald-700' : 'bg-slate-700'} ${m.pinned ? 'ring-1 ring-amber-400/70' : ''}`}>
               {m.fw && <p className="text-[11px] text-white/60 italic flex items-center gap-1"><Icon name="forward" className="size-3" /> ফরওয়ার্ড করা</p>}
-              {m.q && (
-                <button onClick={() => jump(qMid(m.q!))}
-                  className="block w-full text-left border-l-4 border-emerald-300 bg-black/20 rounded px-2 py-1">
-                  <span className="block text-[11px] text-emerald-300">{m.q.from.toLowerCase() === owner ? 'আপনি' : '@' + m.q.from}</span>
-                  <span className="block text-xs text-white/80 line-clamp-2">{raw(m.q.t)}</span>
-                </button>
-              )}
+              {m.q && (() => {
+                // কোটের লেখা ও প্রেরক প্রেরকের দাবি থেকে নয়, লোকাল আসল মেসেজ থেকে; পাওয়া না গেলে দাবিটা অযাচাইকৃত হিসেবে দেখানো হয়
+                const orig = list.find(x => x.mid === qMid(m.q!))
+                const own = orig ? orig.mine : false
+                return (
+                  <button onClick={() => jump(qMid(m.q!))}
+                    className="block w-full text-left border-l-4 border-emerald-300 bg-black/20 rounded px-2 py-1">
+                    <span className="block text-[11px] text-emerald-300">{orig ? (own ? 'আপনি' : '@' + orig.peer) : '@' + m.q.from}</span>
+                    <span className="block text-xs text-white/80 line-clamp-2">{raw(orig ? previewText(orig).slice(0, 120) : m.q.t)}</span>
+                  </button>
+                )
+              })()}
               {m.deleted ? (
                 <p className="italic text-white/60 text-sm flex items-center gap-1.5"><Icon name="ban" className="size-4" /> মেসেজটি মুছে ফেলা হয়েছে</p>
               ) : (
@@ -1108,21 +1198,50 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
           <button onClick={() => stopRec()} className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center"><Icon name="send" /></button>
         </div>
       ) : (
-        <div className="flex gap-2 p-3 border-t border-slate-800">
-          <input ref={fileRef} type="file" className="hidden" onChange={pick} />
-          <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={pick} />
-          <button onClick={() => imgRef.current?.click()} disabled={sending} title="ছবি"
-            className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="image" /></button>
-          <button onClick={() => fileRef.current?.click()} disabled={sending} title="ফাইল"
-            className="size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50"><Icon name="clip" /></button>
-          <input value={text} onChange={e => setText(e.target.value)} maxLength={5000}
-            onKeyDown={e => e.key === 'Enter' && submit()} placeholder="মেসেজ লিখুন"
-            className="flex-1 min-w-0 rounded-full bg-slate-800 px-4 py-3 outline-none focus:ring-2 ring-emerald-500" />
-          {text.trim()
-            ? <button onClick={submit} className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center" title="পাঠান"><Icon name="send" /></button>
+        <>
+        {staged.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto px-3 pt-2 border-t border-slate-800">
+            {staged.map((f, i) => (
+              <StagedChip key={i} f={f} disabled={sending} onRemove={() => setStaged(l => l.filter((_, k) => k !== i))} />
+            ))}
+          </div>
+        )}
+        <div className={`relative flex items-end gap-2 p-3 ${staged.length ? '' : 'border-t border-slate-800'}`}>
+          <input ref={camRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={pick} />
+          <input ref={imgRef} type="file" accept="image/*" multiple className="hidden" onChange={pick} />
+          <input ref={fileRef} type="file" multiple className="hidden" onChange={pick} />
+          {!editing && (
+            <button onClick={() => setAttachOpen(o => !o)} disabled={sending} title="সংযুক্ত করুন"
+              className={`size-11 shrink-0 rounded-full bg-slate-800 grid place-items-center text-slate-300 disabled:opacity-50 transition-transform ${attachOpen ? 'rotate-45' : ''}`}><Icon name="plus" /></button>
+          )}
+          {attachOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setAttachOpen(false)} />
+              <div className="absolute bottom-full left-3 mb-2 z-20 w-48 rounded-xl bg-slate-800 border border-slate-700 shadow-lg shadow-black/40 p-1">
+                {([['camera', 'camera', 'ক্যামেরা', camRef], ['photos', 'image', 'ছবি', imgRef], ['files', 'file', 'ফাইল', fileRef]] as const).map(([k, ic, label, ref]) => (
+                  <button key={k} onClick={() => { setAttachOpen(false); ref.current?.click() }}
+                    className="w-full flex items-center gap-3 rounded-lg px-3 py-3 text-left hover:bg-slate-700">
+                    <Icon name={ic} className="size-5 text-emerald-400" />{label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          <textarea ref={taRef} rows={1} value={text} onChange={e => setText(e.target.value)} maxLength={5000}
+            onKeyDown={e => {
+              // ডেস্কটপে Enter = পাঠান, Shift+Enter = নতুন লাইন; ফোনে Enter নতুন লাইন, পাঠাতে বাটন
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !window.matchMedia('(pointer: coarse)').matches) {
+                e.preventDefault(); void submit()
+              }
+            }}
+            placeholder={staged.length ? 'ক্যাপশন লিখুন (ঐচ্ছিক)' : 'মেসেজ লিখুন'}
+            className="flex-1 min-w-0 resize-none rounded-3xl bg-slate-800 px-4 py-3 text-base leading-6 outline-none focus:ring-2 ring-emerald-500" />
+          {text.trim() || staged.length
+            ? <button onClick={submit} disabled={sending} className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center disabled:opacity-50" title="পাঠান"><Icon name="send" /></button>
             : <button onClick={startRec} disabled={sending}
                 className="size-12 shrink-0 rounded-full bg-emerald-600 grid place-items-center disabled:opacity-50" title="ভয়েস মেসেজ"><Icon name="mic" /></button>}
         </div>
+        </>
       )}
 
       {menu && (
@@ -1148,6 +1267,26 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   )
 }
 
+function StagedChip({ f, disabled, onRemove }: { f: File; disabled: boolean; onRemove: () => void }) {
+  const img = isImg(f.type)
+  const [url, setUrl] = useState('')
+  useEffect(() => {
+    if (!img) return
+    const u = URL.createObjectURL(f)
+    setUrl(u)
+    return () => URL.revokeObjectURL(u)
+  }, [f])
+  return (
+    <div className="relative shrink-0 size-16 rounded-lg bg-slate-800 overflow-hidden grid place-items-center">
+      {img && url
+        ? <img src={url} alt="" className="size-full object-cover" />
+        : <div className="px-1 text-center text-slate-300"><Icon name="file" className="size-5 mx-auto" /><span className="block text-[9px] leading-tight break-all line-clamp-2">{raw(f.name)}</span></div>}
+      <button onClick={onRemove} disabled={disabled} title="সরান"
+        className="absolute top-0.5 right-0.5 size-5 rounded-full bg-black/70 grid place-items-center text-white disabled:opacity-50"><Icon name="x" className="size-3" /></button>
+    </div>
+  )
+}
+
 function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
   peer: string; session: Session; onBack: () => void; onDelete: () => void; onChat?: () => void
 }) {
@@ -1155,10 +1294,25 @@ function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
   const [u, setU] = useState<{ fullName?: string; avatar?: string | null; bio?: string; publicKey?: string | null
     hasCover?: boolean } | null>(null)
   const [cover, setCover] = useState<string | null>(null)
+  const pres = usePresence(peer, session.token)
   const [verified, setVerified] = useState(false)
   const [safety, setSafety] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const [view, setView] = useState(false)
+  const [blocked, setBlocked] = useState<boolean | null>(null)
+  const [blockErr, setBlockErr] = useState('')
+  useEffect(() => {
+    call('/api/blocks', 'GET', undefined, session.token)
+      .then(r => setBlocked(r.blocks.some((b: { username: string }) => b.username.toLowerCase() === peer.toLowerCase())))
+      .catch(() => setBlocked(null))
+  }, [peer])
+  const toggleBlock = async () => {
+    setBlockErr('')
+    try {
+      await call('/api/block', 'POST', { username: peer, on: !blocked }, session.token)
+      setBlocked(!blocked)
+    } catch (e: any) { setBlockErr(e.message) }
+  }
   useEffect(() => {
     lookupUser(peer, session.token).then(r => {
       setU(r)
@@ -1174,13 +1328,19 @@ function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
       <div className="h-36 rounded-xl overflow-hidden bg-gradient-to-r from-emerald-800 to-slate-700">
         {cover && <img src={cover} alt="" className="size-full object-cover" />}
       </div>
-      <div className="flex flex-col items-center gap-1 -mt-14 relative">
-        {u?.avatar
-          ? <button onClick={() => setView(true)}><img src={u.avatar} alt="" className="size-28 rounded-full object-cover ring-4 ring-slate-900" /></button>
-          : <div className="size-28 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
-        <p className="text-xl font-semibold break-words text-center mt-2">{name}</p>
-        <p className="text-sm text-slate-400">@{peer}</p>
-        <PresenceLine peer={peer} token={session.token} />
+      {/* নিজের প্রোফাইল পেজের মতো: ছবি বামে, পাশে নাম ও username; ছবির কোণায় অনলাইন বিন্দু */}
+      <div className="flex items-end gap-3 -mt-14 relative px-1">
+        <span className="relative shrink-0">
+          {u?.avatar
+            ? <button onClick={() => setView(true)}><img src={u.avatar} alt="" className="size-28 shrink-0 rounded-full object-cover ring-4 ring-slate-900" /></button>
+            : <div className="size-28 shrink-0 rounded-full ring-4 ring-slate-900 bg-emerald-700 grid place-items-center text-4xl font-bold uppercase text-white">{peer[0]}</div>}
+          <StatusDot p={pres} big />
+        </span>
+        <div className="min-w-0 flex-1 pb-1">
+          <p className="text-xl font-semibold truncate">{name}</p>
+          <p className="text-sm text-slate-400 truncate">@{peer}</p>
+          <PresenceLine p={pres} />
+        </div>
       </div>
       {view && u?.avatar && <Lightbox src={u.avatar} onClose={() => setView(false)} />}
       <Card title="Bio">
@@ -1195,6 +1355,13 @@ function PeerProfilePage({ peer, session, onBack, onDelete, onChat }: {
           {verified ? 'ভেরিফাইড' : 'এন্ড-টু-এন্ড এনক্রিপ্টেড'}
         </p>
         <button onClick={() => setSafety(true)} className="w-full rounded-lg bg-slate-700 py-3">নিরাপত্তা যাচাই (সেফটি নাম্বার)</button>
+      </Card>
+      <Card>
+        <button onClick={toggleBlock} disabled={blocked === null} className="w-full text-red-400 py-2 disabled:opacity-50">
+          {blocked ? 'আনব্লক করুন' : 'ব্লক করুন'}
+        </button>
+        {blocked && <p className="text-xs text-slate-400">ব্লক করা আছে: এই ইউজার আপনাকে মেসেজ বা ফাইল পাঠাতে পারবে না, আর সে সেটা জানতে পারবে না।</p>}
+        {blockErr && <p className="text-sm text-red-400">{blockErr}</p>}
       </Card>
       <Card>
         {confirm ? (

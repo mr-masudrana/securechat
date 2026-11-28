@@ -1,6 +1,6 @@
 import { BASE, call } from './api'
 
-export type Incoming = { k: string; id: string; ts: number; from: string; payload: string }
+export type Incoming = { k: string; id: string; ts: number; from: string; fromId?: string; payload: string }
 export type Conn = {
   send: (to: string, payload: string, id?: string, quiet?: boolean) => string | null
   isOpen: () => boolean

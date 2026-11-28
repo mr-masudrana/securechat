@@ -3,18 +3,20 @@ import { call } from './api'
 import { lookupUser } from './crypto'
 
 export type Profile = { fullName: string; avatar: string | null }
-const cache = new Map<string, Profile>()
+// ৬০ সেকেন্ডের পুরনো হলে আবার আনা হয় (আগের ছবি/নাম দেখিয়ে), যাতে অন্যের বদলানো ছবি/নাম রিলোড ছাড়াই আসে
+const cache = new Map<string, { p: Profile; at: number }>()
+const TTL = 60_000
 
 export function useProfile(name: string, token: string) {
   const k = name.toLowerCase()
-  const [p, setP] = useState<Profile | undefined>(cache.get(k))
+  const [p, setP] = useState<Profile | undefined>(cache.get(k)?.p)
   useEffect(() => {
     let alive = true
     const hit = cache.get(k)
-    if (hit) { setP(hit); return }
+    if (hit) { setP(hit.p); if (Date.now() - hit.at < TTL) return }
     lookupUser(name, token).then(u => {
       const v = { fullName: u.fullName || u.username, avatar: u.avatar ?? null }
-      cache.set(k, v)
+      cache.set(k, { p: v, at: Date.now() })
       if (alive) setP(v)
     }).catch(() => {})
     return () => { alive = false }

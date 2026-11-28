@@ -2,7 +2,7 @@ import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import Icon from './Icon'
 import { call } from './api'
-import { resizeCover } from './media'
+import { resizeCover, snapshot } from './media'
 import { fingerprint, type Identity } from './crypto'
 import { getLangPref, raw, setLangPref, type Lang } from './i18n'
 import { setReadReceipts, readReceiptsOn, setSound, soundOn } from './notify'
@@ -143,10 +143,11 @@ export function AccountPage({ session, avatar, onAvatar, onRemoveAvatar, onPatch
       .then(r => setCover(r.cover ?? null)).catch(() => {})
   }, [session.hasCover])
   const pickCover = (e: ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
-    e.target.value = ''
-    if (!f) return
+    const f0 = e.target.files?.[0]
+    if (!f0) { e.target.value = ''; return }
     void run(async () => {
+      let f: File
+      try { f = await snapshot(f0) } finally { e.target.value = '' } // ফাইল আগে পড়ে তবেই ইনপুট খালি
       const c = await resizeCover(f)
       await call('/api/profile/cover', 'POST', { cover: c }, session.token)
       setCover(c); onPatch({ hasCover: true }); setOk('কভার ফটো বদলেছে')
@@ -320,11 +321,11 @@ function PasswordForm({ token, onDone }: { token: string; onDone: () => void }) 
   return (
     <div className="space-y-3">
       <Inp type="password" value={cur} onChange={e => setCur(e.target.value)} placeholder="বর্তমান পাসওয়ার্ড" autoComplete="current-password" />
-      <Inp type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="নতুন পাসওয়ার্ড (কমপক্ষে ৮ অক্ষর)" autoComplete="new-password" />
+      <Inp type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="নতুন পাসওয়ার্ড (কমপক্ষে ১০ অক্ষর)" autoComplete="new-password" />
       <Inp type="password" value={pw2} onChange={e => setPw2(e.target.value)} placeholder="নতুন পাসওয়ার্ড আবার লিখুন" autoComplete="new-password" />
       <Err msg={err} />
       <Btn busy={busy} onClick={() => run(async () => {
-        if (pw.length < 8) throw new Error('নতুন Password কমপক্ষে ৮ অক্ষর')
+        if (pw.length < 10) throw new Error('নতুন Password কমপক্ষে ১০ অক্ষর')
         if (pw !== pw2) throw new Error('দুটো Password মিলছে না')
         await call('/api/account/password', 'POST', { current: cur, password: pw }, token)
         onDone()
@@ -366,6 +367,7 @@ export function PrivacyPage({ session, identity, onPatch, onClearAll, onDeleteAc
         {open === 'password' && <PasswordForm token={session.token} onDone={() => { setOpen(null); setOk('পাসওয়ার্ড বদলেছে, অন্য ডিভাইস লগআউট হয়ে গেছে') }} />}
       </Card>
       <VisibilityCard session={session} onPatch={onPatch} />
+      <BlockedCard token={session.token} />
       <Card title="চ্যাট প্রাইভেসি">
         <div className="flex items-center justify-between gap-3 text-sm">
           <span>
@@ -412,6 +414,29 @@ export function PrivacyPage({ session, identity, onPatch, onClearAll, onDeleteAc
         )}
       </Card>
     </PageShell>
+  )
+}
+
+// ---------- ব্লক করা ইউজার ----------
+function BlockedCard({ token }: { token: string }) {
+  const [list, setList] = useState<{ username: string; fullName: string }[] | null>(null)
+  const r = useRun()
+  const load = () => call('/api/blocks', 'GET', undefined, token).then(x => setList(x.blocks)).catch(() => setList([]))
+  useEffect(() => { void load() }, [])
+  return (
+    <Card title="ব্লক করা ইউজার">
+      {list === null ? <p className="text-sm text-slate-400">…</p>
+        : list.length === 0 ? <p className="text-sm text-slate-400">কাউকে ব্লক করা নেই</p>
+        : list.map(b => (
+          <div key={b.username} className="flex items-center justify-between gap-2 text-sm">
+            <span className="min-w-0 truncate">{raw(b.fullName)} <span className="text-slate-400">@{b.username}</span></span>
+            <button disabled={r.busy} className="shrink-0 text-emerald-400 disabled:opacity-50"
+              onClick={() => r.run(async () => { await call('/api/block', 'POST', { username: b.username, on: false }, token); await load() })}>আনব্লক</button>
+          </div>
+        ))}
+      <Err msg={r.err} />
+      <p className="text-xs text-slate-500">ব্লক করা ইউজার আপনাকে মেসেজ বা ফাইল পাঠাতে পারে না, আর সে সেটা জানতে পারে না।</p>
+    </Card>
   )
 }
 

@@ -33,7 +33,7 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
     try { await fn() } catch (e: any) { setError(e.message) } finally { setBusy(false) }
   }
   const pwCheck = () => {
-    if (password.length < 8) throw new Error('Password কমপক্ষে ৮ অক্ষর')
+    if (password.length < 10) throw new Error('Password কমপক্ষে ১০ অক্ষর')
     if (password !== confirm) throw new Error('দুটো Password মিলছে না')
   }
 
@@ -46,7 +46,7 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
       pwCheck()
       await call('/api/register', 'POST', { fullName, email, password })
       setCode(''); setWait(60); setMode('verify')
-      setInfo(`${email.trim()} ঠিকানায় ৬ সংখ্যার কোড পাঠানো হয়েছে। কোড না এলে হয়তো এই ইমেইলে আগেই অ্যাকাউন্ট আছে, লগইন করুন`)
+      setInfo(`${email.trim()} ঠিকানায় ৬ সংখ্যার কোড পাঠানো হয়েছে। কিছুক্ষণের মধ্যে না এলে স্প্যাম ফোল্ডার দেখুন`)
     } else if (mode === 'verify') {
       const r = await call('/api/verify', 'POST', { email, code })
       onAuth(r.token, r.me)
@@ -99,9 +99,9 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
         )}
         {showPw && (
           <input className={input} type="password"
-            placeholder={mode === 'login' ? 'Password' : 'Password তৈরি করুন (কমপক্ষে ৮ অক্ষর)'}
+            placeholder={mode === 'login' ? 'Password' : 'Password তৈরি করুন (কমপক্ষে ১০ অক্ষর)'}
             value={password} onChange={e => setPassword(e.target.value)}
-            onKeyDown={e => mode === 'login' && e.key === 'Enter' && submit()}
+            onKeyDown={e => mode === 'login' && e.key === 'Enter' && !e.nativeEvent.isComposing && submit()}
             autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
         )}
         {showConfirm && (
@@ -125,6 +125,7 @@ export default function AuthScreen({ onAuth }: { onAuth: (token: string, me: Me)
             <button onClick={() => go('register')}>নতুন অ্যাকাউন্ট খুলুন</button>
             <button onClick={() => go('forgot')}>পাসওয়ার্ড ভুলে গেছেন?</button>
           </>}
+          {mode === 'register' && <button onClick={() => go('verify')}>কোড পেয়েছেন? ভেরিফাই করুন</button>}
           {mode !== 'login' && (
             <button onClick={() => go('login')} className="flex items-center gap-1"><Icon name="back" className="size-4" /> লগইনে ফিরুন</button>
           )}

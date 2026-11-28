@@ -3,6 +3,7 @@ import { call } from './api'
 import { resizeAvatar } from './media'
 import type { Me } from './types'
 import Icon from './Icon'
+import { raw } from './i18n'
 
 export default function ProfileSetup({ me, token, onDone, onLogout }: {
   me: Me; token: string; onDone: (me: Me) => void; onLogout: () => void
@@ -35,7 +36,7 @@ export default function ProfileSetup({ me, token, onDone, onLogout }: {
     <div className="min-h-dvh grid place-items-center bg-slate-900 text-white p-4">
       <div className="w-full max-w-sm space-y-4 text-center">
         <h1 className="text-2xl font-bold">প্রোফাইল সম্পূর্ণ করুন</h1>
-        <p className="text-slate-400 text-sm">স্বাগতম, {me.fullName}! একটা username বেছে নিন (পরে মাসে একবার বদলানো যাবে)।</p>
+        <p className="text-slate-400 text-sm">স্বাগতম, {raw(me.fullName)}! একটা username বেছে নিন (পরে মাসে একবার বদলানো যাবে)।</p>
         <button onClick={() => fileRef.current?.click()}
           className="mx-auto size-28 rounded-full bg-slate-800 grid place-items-center overflow-hidden text-4xl">
           {avatar ? <img src={avatar} alt="" className="size-full object-cover" /> : <Icon name="camera" className="size-10 text-slate-400" />}
@@ -43,7 +44,7 @@ export default function ProfileSetup({ me, token, onDone, onLogout }: {
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={pick} />
         <p className="text-xs text-slate-500">প্রোফাইল ছবি (ঐচ্ছিক, পরেও দেওয়া যাবে)</p>
         <input value={username} onChange={e => setUsername(e.target.value.trim())} placeholder="username"
-          autoCapitalize="none" onKeyDown={e => e.key === 'Enter' && submit()}
+          autoCapitalize="none" onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && submit()}
           className="w-full rounded-lg bg-slate-800 px-4 py-3 outline-none focus:ring-2 ring-emerald-500" />
         {error && <p className="text-red-400 text-sm">{error}</p>}
         <button onClick={submit} disabled={busy}

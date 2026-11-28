@@ -1,5 +1,7 @@
 // শুধু অ্যাপের ফাইল ক্যাশ হয়। API (আলাদা ডোমেইন) ও মেসেজ কখনো ক্যাশ হয় না।
-const CACHE = 'securechat-v2'
+const CACHE = 'securechat-v3' // নাম বদলালে পুরনো (সম্ভবত নষ্ট) ক্যাশ activate-এর সময় মুছে যায়
+// শুধু সফল ও HTML-নয় এমন রেসপন্স ক্যাশ হয়: ফাইল না পেলে সার্ভার index.html (200) ফেরত দেয়, সেটা CSS/JS হিসেবে ক্যাশ হয়ে অ্যাপ স্টাইলহীন হয়ে যাওয়া ঠেকাতে
+const isHtml = res => (res.headers.get('content-type') || '').includes('text/html')
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', e => e.waitUntil((async () => {
   for (const k of await caches.keys()) if (k !== CACHE && k !== 'prefs') await caches.delete(k)
@@ -10,11 +12,13 @@ self.addEventListener('fetch', e => {
   if (r.method !== 'GET' || u.origin !== location.origin || u.pathname.startsWith('/api/')) return
   if (r.mode === 'navigate') {
     e.respondWith(fetch(r).then(res => {
-      const c = res.clone(); caches.open(CACHE).then(x => x.put('/index.html', c)); return res
+      if (res.ok && isHtml(res)) { const c = res.clone(); caches.open(CACHE).then(x => x.put('/index.html', c)) }
+      return res
     }).catch(() => caches.match('/index.html')))
   } else if (u.pathname.startsWith('/assets/')) {
     e.respondWith(caches.match(r).then(hit => hit || fetch(r).then(res => {
-      const c = res.clone(); caches.open(CACHE).then(x => x.put(r, c)); return res
+      if (res.ok && !isHtml(res)) { const c = res.clone(); caches.open(CACHE).then(x => x.put(r, c)) }
+      return res
     })))
   }
 })
