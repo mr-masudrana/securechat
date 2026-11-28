@@ -872,6 +872,9 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
   const imgRef = useRef<HTMLInputElement>(null)
   const camRef = useRef<HTMLInputElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const [staged, setStaged] = useState<File[]>([]) // পাঠানোর অপেক্ষায় থাকা ফাইল/ছবি
+  const [attachOpen, setAttachOpen] = useState(false)
+  const [rec, setRec] = useState(false)
   // ইনপুট লেখা অনুযায়ী বাড়ে, সর্বোচ্চ ৫ লাইন (এরপর স্ক্রোল)
   useLayoutEffect(() => {
     const el = taRef.current
@@ -879,9 +882,6 @@ function ChatView({ peer, session, list, dl, act, peers, onSend, onSendFile, onD
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 24 * 5 + 24) + 'px'
   }, [text, rec])
-  const [staged, setStaged] = useState<File[]>([]) // পাঠানোর অপেক্ষায় থাকা ফাইল/ছবি
-  const [attachOpen, setAttachOpen] = useState(false)
-  const [rec, setRec] = useState(false)
   const [secs, setSecs] = useState(0)
   const mr = useRef<MediaRecorder | null>(null)
   const chunks = useRef<Blob[]>([])
